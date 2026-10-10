@@ -29,6 +29,26 @@ function check(name, cond, extra) {
   log.className = cond ? 'ok' : 'bad';
 }
 function sleep(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
+/* Cede tiempo REAL. Con el reloj virtual de Chrome los temporizadores se
+   adelantan y las operaciones que tardan de verdad (PBKDF2, IndexedDB) quedan
+   pendientes; un pedido de red real obliga a esperar. */
+function yieldReal() {
+  return fetch('ping.txt?_=' + Math.random(), { cache: 'no-store' })
+    .then(function () {}, function () {});
+}
+/* Espera por condición: cede tiempo real en cada vuelta. */
+function waitFor(cond, maxVueltas) {
+  var n = 0, max = maxVueltas || 60;
+  return new Promise(function (res) {
+    (function loop() {
+      var ok = false;
+      try { ok = !!cond(); } catch (e) { ok = false; }
+      if (ok) return res(true);
+      if (n++ > max) return res(false);
+      yieldReal().then(function () { setTimeout(loop, 5); });
+    })();
+  });
+}
 function finish() {
   var fails = results.filter(function (r) { return !r.ok; });
   log.textContent += '\n\n' + (fails.length ? 'FALLAS: ' + fails.length + ' de ' + results.length : 'TODO OK (' + results.length + ' comprobaciones)');
@@ -44,43 +64,77 @@ function finish() {
   await new Promise(function (res) { frame.addEventListener('load', res, { once: true }); });
   w = frame.contentWindow; d = frame.contentDocument;
   w.addEventListener('error', function (e) { errors.push(String(e.message)); });
+  await waitFor(function () { return w.HIERRO && w.HIERRO.CORE; }, 10000);
 
-  // Estado limpio
+  // Sin service worker ni cachés: la prueba tiene que correr contra los
+  // archivos reales, no contra una copia vieja guardada por el service worker.
+  function conTimeout(p, maxVueltas) {
+    var listo = false, val = null;
+    Promise.resolve(p).then(function (v) { listo = true; val = v; }, function () { listo = true; });
+    return waitFor(function () { return listo; }, maxVueltas || 200).then(function () { return val; });
+  }
+  try {
+    if (w.navigator && w.navigator.serviceWorker) {
+      var regs = await conTimeout(w.navigator.serviceWorker.getRegistrations(), 150);
+      if (regs) for (var i = 0; i < regs.length; i++) { try { regs[i].unregister(); } catch (e) {} }
+    }
+    if (w.caches && w.caches.keys) {
+      var claves = await conTimeout(w.caches.keys(), 150);
+      if (claves) for (var j = 0; j < claves.length; j++) { await conTimeout(w.caches.delete(claves[j]), 200); }
+    }
+  } catch (e) { /* si no se puede, se sigue igual */ }
+
+  // Estado limpio: se vacían las tablas (no se borra la base, que dejaría una
+  // operación pendiente bloqueando la apertura siguiente).
+  await new Promise(function (res) { w.HIERRO.CORE.store.reset().then(res, res); });
   w.localStorage.clear();
   await new Promise(function (res) {
     frame.addEventListener('load', res, { once: true });
     frame.contentWindow.location.reload();
   });
-  await sleep(400);
   w = frame.contentWindow; d = frame.contentDocument;
   w.addEventListener('error', function (e) { errors.push(String(e.message)); });
+  await waitFor(function () { return w.HIERRO && w.HIERRO.ready; });
+  await w.HIERRO.ready;   // señal real: la app terminó de abrir la base
+  await waitFor(function () { return d.querySelector('.gate') || d.querySelector('.tabbar') || d.querySelector('.view'); });
   w.confirm = function () { return true; };
   w.alert = function () {};
+  w.prompt = function () { return null; };
 
-  check('arranca en la pantalla de acceso', !!d.querySelector('.gate'), 'no se encontró .gate');
-  check('sin perfiles no hay pestaña Entrar (no se puede caer en un formulario vacío)', d.querySelector('[data-act="gate-tab"][data-tab="login"]') === null);
-  check('sin perfiles se muestra directamente el alta', !!d.querySelector('form[data-form="register"]') && d.querySelector('form[data-form="register"]').hidden === false);
-  check('sin perfiles el formulario de entrada no está en la página', d.querySelector('form[data-form="login"]') === null);
+  check('arranca en la pantalla de acceso', !!d.querySelector('.gate'),
+    'main=' + (d.querySelector('#main') ? d.querySelector('#main').textContent.slice(0, 120) : 'sin main') +
+    ' | traza=' + JSON.stringify(w.HIERRO && w.HIERRO.bootTrace) + ' | backend=' + w.HIERRO.CORE.store.backend());
+  check('la base arrancó en IndexedDB', w.HIERRO && w.HIERRO.CORE && w.HIERRO.CORE.store.backend() === 'idb',
+    w.HIERRO && w.HIERRO.CORE ? w.HIERRO.CORE.store.backend() : 'sin core');
+  check('sin usuarios no hay formulario de entrada', d.querySelector('form[data-form="login"]') === null);
+  check('sin usuarios se pide el alta del administrador', !!d.querySelector('form[data-form="alta-admin"]'));
+  check('no hay auto-registro: no existe la pestaña "Crear perfil"', d.querySelector('[data-act="gate-tab"]') === null);
   check('no hay errores de JS al arrancar', errors.length === 0, errors.join(' | '));
 
-  // ── Registro ──────────────────────────────────────────────────────────
+  // ── Alta del administrador ────────────────────────────────────────────
   var nameInput = d.querySelector('#regName');
-  check('el formulario de registro existe', !!nameInput);
-  var tabAlta = d.querySelector('[data-act="gate-tab"][data-tab="register"]');
-  if (tabAlta) tabAlta.click();
+  check('el formulario de alta existe', !!nameInput);
   d.querySelector('#regName').value = 'Tester';
   d.querySelector('#regPass').value = '1234';
   d.querySelector('#regWeight').value = '82';
   d.querySelector('[data-act="pick-objetivo"][data-value="fuerza"]').click();
-  d.querySelector('form[data-form="register"]').requestSubmit();
-  await sleep(500);
+  d.querySelector('form[data-form="alta-admin"]').requestSubmit();
+  await waitFor(function () { return w.HIERRO.state.account; }, 15000);
 
   var st = w.HIERRO.state;
-  check('se creó el perfil', st.account && st.account.name === 'Tester', 'account=' + JSON.stringify(st.account && st.account.name));
+  check('se creó el usuario', st.account && st.account.name === 'Tester', 'account=' + JSON.stringify(st.account && st.account.name));
+  check('la primera cuenta es administradora', st.account && st.account.role === 'admin', st.account && st.account.role);
+  check('la contraseña se guarda derivada (PBKDF2), no en claro',
+    !!(st.account && /^pbkdf2\$150000\$/.test(st.account.hash)) && !JSON.stringify(st.account).includes('1234'),
+    st.account && String(st.account.hash).slice(0, 22));
+  var guardado = await conTimeout(w.HIERRO.CORE.store.document(st.account.id), 150);
+  check('el documento se guardó en la base', !!guardado && guardado.schema === 2,
+    'traza=' + JSON.stringify(w.HIERRO.bootTrace) + ' leido=' + (guardado ? JSON.stringify(guardado).slice(0, 80) : 'no resolvió'));
   check('el objetivo elegido se guardó', st.data.profile.objetivo === 'fuerza', st.data.profile.objetivo);
   check('el peso inicial se guardó', st.data.profile.weightKg === 82, String(st.data.profile.weightKg));
 
   // ── Dashboard ─────────────────────────────────────────────────────────
+  await waitFor(function () { return /Hola, Tester/.test(d.querySelector('#main').textContent); }, 150);
   check('el dashboard muestra el saludo', /Hola, Tester/.test(d.querySelector('#main').textContent));
   check('la rutina sugerida respeta el objetivo', /Fuerza A/.test(d.querySelector('#main').textContent));
   check('la barra de navegación tiene 4 secciones', d.querySelectorAll('.tab').length === 4);
@@ -267,9 +321,16 @@ function finish() {
     frame.addEventListener('load', res, { once: true });
     frame.contentWindow.location.reload();
   });
-  await sleep(500);
-  w = frame.contentWindow;
-  check('la sesión del usuario persiste tras recargar', !!w.HIERRO.state.account, 'sin cuenta activa');
+  w = frame.contentWindow; d = frame.contentDocument;
+  w.addEventListener('error', function (e) { errors.push(String(e.message)); });
+  w.confirm = function () { return true; };
+  w.alert = function () {};
+  w.prompt = function () { return null; };
+  await waitFor(function () { return w.HIERRO && w.HIERRO.ready; });
+  await w.HIERRO.ready;
+  await waitFor(function () { return w.HIERRO.state.account; }, 150);
+  check('la sesión del usuario persiste tras recargar', !!w.HIERRO.state.account,
+    'traza=' + JSON.stringify(w.HIERRO.bootTrace));
   check('el historial persiste tras recargar', w.HIERRO.state.data.sessions.length >= 2, String(w.HIERRO.state.data.sessions.length));
 
   // ── Cambio de unidad ──────────────────────────────────────────────────
@@ -325,34 +386,166 @@ function finish() {
   d.querySelector('#newPass').value = 'nueva1234';
   d.querySelector('#newPass2').value = 'nueva1234';
   d.querySelector('form[data-form="password"]').requestSubmit();
-  await sleep(450);
-  d = frame.contentDocument;
-  check('el cambio de contraseña cierra el formulario', d.querySelector('#passForm').hidden === true);
+  await waitFor(function () { return d.querySelector('#passForm').hidden === true; }, 150);
+  check('el cambio de contraseña cierra el formulario', d.querySelector('#passForm').hidden === true,
+    'error=' + (d.querySelector('#passError') ? d.querySelector('#passError').textContent : 'sin nodo') +
+    ' | hash=' + String(w.HIERRO.state.account && w.HIERRO.state.account.hash).slice(0, 20) +
+    ' | traza=' + JSON.stringify((w.HIERRO.CORE.trace || []).slice(-10)));
 
   d.querySelector('[data-act="logout"]').click();
-  await sleep(400);
-  d = frame.contentDocument;
+  await waitFor(function () { return !!d.querySelector('.gate'); }, 150);
   check('cerrar sesión vuelve a la pantalla de acceso', !!d.querySelector('.gate'));
 
   d.querySelector('#loginUser').value = w.HIERRO.state.users[0].name;
   d.querySelector('#loginPass').value = '1234';
   d.querySelector('form[data-form="login"]').requestSubmit();
-  await sleep(450);
+  await waitFor(function () { return d.querySelector('#loginError') && !d.querySelector('#loginError').hidden; }, 150);
   check('la contraseña vieja ya no entra', w.HIERRO.state.account === null, 'entró con la vieja');
 
   d = frame.contentDocument;
   d.querySelector('#loginUser').value = 'NombreQueNoExiste';
   d.querySelector('#loginPass').value = 'nueva1234';
   d.querySelector('form[data-form="login"]').requestSubmit();
-  await sleep(400);
+  await waitFor(function () { return d.querySelector('#loginError') && !d.querySelector('#loginError').hidden; }, 150);
   check('un nombre inexistente no entra', w.HIERRO.state.account === null);
-  check('el aviso de nombre inexistente se muestra', /no hay ningún perfil/i.test(d.querySelector('#loginError').textContent), d.querySelector('#loginError').textContent);
+  check('el aviso de nombre inexistente se muestra', /no hay ningún usuario/i.test(d.querySelector('#loginError').textContent), d.querySelector('#loginError').textContent);
 
   d.querySelector('#loginUser').value = w.HIERRO.state.users[0].name;
   d.querySelector('#loginPass').value = 'nueva1234';
   d.querySelector('form[data-form="login"]').requestSubmit();
-  await sleep(500);
-  check('entra escribiendo el nombre y la contraseña nueva', w.HIERRO.state.account !== null, 'no entró con la nueva');
+  await waitFor(function () { return w.HIERRO.state.account !== null; }, 300);
+  check('entra escribiendo el nombre y la contraseña nueva', w.HIERRO.state.account !== null,
+    'error=' + (d.querySelector('#loginError') ? d.querySelector('#loginError').textContent : 'sin nodo'));
+
+  // El ingreso termina navegando a "Hoy": hay que dejarlo terminar antes de
+  // cambiar de pantalla, o la navegación pisa el cambio.
+  await waitFor(function () { return /Hola,/.test(d.querySelector('#main').textContent); }, 300);
+
+  // ── Administración de usuarios (solo el administrador) ────────────────
+  w.location.hash = '#/perfil';
+  await waitFor(function () { return /Alta de usuario/.test(d.querySelector('#main').textContent); }, 300);
+  d = frame.contentDocument;
+  check('el administrador ve el panel de usuarios', /Alta de usuario/.test(d.querySelector('#main').textContent));
+  d.querySelector('#nuNombre').value = 'Ana';
+  d.querySelector('#nuClave').value = 'ana12345';
+  d.querySelector('form[data-form="nuevo-usuario"]').requestSubmit();
+  await waitFor(function () { return w.HIERRO.usuarios.porNombre('Ana'); }, 300);
+  await waitFor(function () { return /Ana/.test(d.querySelector('#main').textContent); }, 300);
+  d = frame.contentDocument;
+  var ana = w.HIERRO.usuarios.porNombre('Ana');
+  check('el administrador da de alta un usuario', !!ana, JSON.stringify(w.HIERRO.state.users.map(function (u) { return u.name; })));
+  check('el usuario nuevo no es administrador', ana && ana.role === 'user', ana && ana.role);
+  check('su contraseña queda derivada con PBKDF2', !!(ana && /^pbkdf2\$150000\$/.test(ana.hash)));
+  check('el panel lista a los dos usuarios', /Ana/.test(d.querySelector('#main').textContent) && /Tester/.test(d.querySelector('#main').textContent),
+    'main=' + d.querySelector('#main').textContent.slice(0, 100));
+
+  var enlace = w.HIERRO.usuarios.enlace(ana);
+  check('el enlace de alta lleva la cuenta pero no la contraseña',
+    enlace.indexOf('#alta=') > -1 && enlace.indexOf('ana12345') === -1, enlace.slice(0, 64) + '…');
+  var pack = w.HIERRO.CORE.packs.unpackAccount(decodeURIComponent(enlace.split('#alta=')[1]));
+  check('el enlace se puede leer de vuelta', !!pack && pack.name === 'Ana', pack && pack.name);
+
+  await waitFor(function () { return !!d.querySelector('[data-act="export-csv"]'); }, 300);
+  check('el perfil ofrece exportar CSV', !!d.querySelector('[data-act="export-csv"]'),
+    'main=' + d.querySelector('#main').textContent.slice(0, 100));
+  var csv = w.HIERRO.CORE.csv.sessionsToCsv(w.HIERRO.state.data.sessions);
+  check('el CSV del historial tiene encabezado y filas', csv.split('\r\n').length >= 2, csv.split('\r\n')[0]);
+  var respaldos = await new Promise(function (res) { w.HIERRO.CORE.store.backups().then(res); });
+  check('hay un respaldo automático guardado', respaldos.length >= 1, String(respaldos.length));
+
+  // Desactivar a Ana y comprobar que no puede entrar
+  d.querySelector('[data-act="u-toggle"][data-user="' + ana.id + '"]').click();
+  await sleep(900);
+  var anaOff = w.HIERRO.state.users.filter(function (u) { return u.id === ana.id; })[0];
+  check('el administrador puede desactivar a un usuario', anaOff.disabled === true);
+
+  d = frame.contentDocument;
+  d.querySelector('[data-act="logout"]').click();
+  await waitFor(function () { return !!d.querySelector('.gate'); }, 150);
+  d = frame.contentDocument;
+  d.querySelector('#loginUser').value = 'Ana';
+  d.querySelector('#loginPass').value = 'ana12345';
+  d.querySelector('form[data-form="login"]').requestSubmit();
+  await waitFor(function () { return d.querySelector('#loginError') && !d.querySelector('#loginError').hidden; }, 300);
+  check('un usuario desactivado no puede entrar', w.HIERRO.state.account === null, 'entró igual');
+  check('y el aviso lo explica', /desactivado/i.test(d.querySelector('#loginError').textContent), d.querySelector('#loginError').textContent);
+
+  // El administrador vuelve y la reactiva
+  d = frame.contentDocument;
+  d.querySelector('#loginUser').value = 'Tester';
+  d.querySelector('#loginPass').value = 'nueva1234';
+  d.querySelector('form[data-form="login"]').requestSubmit();
+  await waitFor(function () { return w.HIERRO.state.account && w.HIERRO.state.account.name === 'Tester'; }, 300);
+  await waitFor(function () { return /Hola,/.test(d.querySelector('#main').textContent); }, 300);
+  check('el administrador vuelve a entrar', !!(w.HIERRO.state.account && w.HIERRO.state.account.name === 'Tester'));
+  w.location.hash = '#/perfil';
+  await waitFor(function () { return !!d.querySelector('[data-act="u-toggle"][data-user="' + ana.id + '"]'); }, 300);
+  d.querySelector('[data-act="u-toggle"][data-user="' + ana.id + '"]').click();
+  await waitFor(function () {
+    var u = w.HIERRO.state.users.filter(function (x) { return x.id === ana.id; })[0];
+    return u && u.disabled === false;
+  }, 300);
+  check('la reactivación deja al usuario activo',
+    w.HIERRO.state.users.filter(function (u) { return u.id === ana.id; })[0].disabled === false);
+
+  // ── Migración desde el formato viejo (localStorage v1) ────────────────
+  // La contraseña vieja usaba SHA-256 de una pasada: se calcula igual que antes
+  // para comprobar que un usuario migrado puede entrar con su clave de siempre.
+  var salVieja = 'salv';
+  var claveVieja = 'claveVieja1';
+  var bufViejo = await w.crypto.subtle.digest('SHA-256', new w.TextEncoder().encode(salVieja + '::' + claveVieja));
+  var hashViejo = Array.prototype.map.call(new w.Uint8Array(bufViejo), function (b) { return b.toString(16).padStart(2, '0'); }).join('');
+
+  await new Promise(function (res) { w.HIERRO.CORE.store.reset().then(res, res); });
+  w.localStorage.setItem('hierro.v1.users', JSON.stringify([{
+    id: 'viejo1', name: 'Viejo', salt: salVieja, hash: hashViejo, createdAt: 1700000000000,
+    profile: { name: 'Viejo', weightKg: 90, heightCm: 180, objetivo: 'fuerza', level: 'Intermedio', days: 3 },
+  }]));
+  w.localStorage.setItem('hierro.v1.session', JSON.stringify('viejo1'));
+  w.localStorage.setItem('hierro.v1.user.viejo1', JSON.stringify({
+    profile: { weightKg: 90 }, prefs: { unit: 'kg', barKg: 20 },
+    sessions: [{ id: 's1', date: '2026-01-01', routineName: 'Vieja', objetivo: 'fuerza', entries: [], startedAt: 1, finishedAt: 2 }],
+    prs: { squat: { name: 'Sentadilla trasera', weightKg: 110, reps: 5, date: '2026-01-01' } },
+    bodyweight: [{ date: '2026-01-01', kg: 90 }],
+  }));
+  await new Promise(function (res) {
+    frame.addEventListener('load', res, { once: true });
+    frame.contentWindow.location.reload();
+  });
+  w = frame.contentWindow; d = frame.contentDocument;
+  w.addEventListener('error', function (e) { errors.push(String(e.message)); });
+  w.confirm = function () { return true; };
+  w.alert = function () {};
+  w.prompt = function () { return null; };
+  await waitFor(function () { return w.HIERRO && w.HIERRO.ready; });
+  await w.HIERRO.ready;
+  await waitFor(function () { return w.HIERRO.state.users.length > 0; }, 300);
+
+  check('los datos del formato viejo se migran solos', w.HIERRO.state.users.length === 1 && w.HIERRO.state.users[0].name === 'Viejo',
+    'usuarios=' + w.HIERRO.state.users.length);
+  check('el usuario migrado queda como administrador', w.HIERRO.state.users[0].role === 'admin', w.HIERRO.state.users[0].role);
+  check('el historial viejo llega completo', w.HIERRO.state.data.sessions.length === 1,
+    String(w.HIERRO.state.data.sessions.length));
+  check('los récords viejos se conservan', !!(w.HIERRO.state.data.prs.squat && w.HIERRO.state.data.prs.squat.weightKg === 110));
+  check('el respaldo viejo NO se borra', !!w.localStorage.getItem('hierro.v1.users') && !!w.localStorage.getItem('hierro.v1.user.viejo1'));
+
+  // Y con la contraseña de siempre tiene que poder entrar (y se actualiza sola).
+  await new Promise(function (res) { w.HIERRO.CORE.store.setSessionId(null).then(res, res); });
+  await new Promise(function (res) { frame.addEventListener('load', res, { once: true }); w.location.reload(); });
+  w = frame.contentWindow; d = frame.contentDocument;
+  w.addEventListener('error', function (e) { errors.push(String(e.message)); });
+  await waitFor(function () { return w.HIERRO && w.HIERRO.ready; });
+  await w.HIERRO.ready;
+  await waitFor(function () { return !!d.querySelector('#loginUser'); }, 300);
+  d.querySelector('#loginUser').value = 'Viejo';
+  d.querySelector('#loginPass').value = claveVieja;
+  d.querySelector('form[data-form="login"]').requestSubmit();
+  await waitFor(function () { return w.HIERRO.state.account !== null; }, 300);
+  check('el usuario migrado entra con su contraseña de siempre', !!w.HIERRO.state.account,
+    'error=' + (d.querySelector('#loginError') ? d.querySelector('#loginError').textContent : 'sin nodo'));
+  var migrado = w.HIERRO.state.users[0];
+  check('y su credencial se actualiza al formato nuevo', !!(migrado && migrado.iterations === 150000 && /^pbkdf2\$/.test(migrado.hash)),
+    String(migrado && migrado.hash).slice(0, 24));
 
   check('sin errores de JS durante todo el recorrido', errors.length === 0, errors.join(' | '));
   finish();

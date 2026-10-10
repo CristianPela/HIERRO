@@ -7,11 +7,12 @@
    Al publicar cambios, subí el número de VERSION para invalidar la caché vieja.
    ═══════════════════════════════════════════════════════════════════════════ */
 
-var VERSION = 'hierro-v6';
+var VERSION = 'hierro-v7';
 var SHELL = [
   './',
   './index.html',
   './styles.css',
+  './app-core.js',
   './app.js',
   './data/exercises.js',
   './data/routines.js',
@@ -57,17 +58,21 @@ self.addEventListener('fetch', function (event) {
     return;
   }
 
-  // Mismo origen (CSS, JS, datos): caché primero, red después.
+  // Mismo origen (CSS, JS, datos): se responde al instante desde la copia
+  // guardada y en paralelo se busca la versión nueva para actualizarla
+  // (stale-while-revalidate). Así una versión nueva entra en la carga
+  // siguiente sin depender de que alguien se acuerde de subir VERSION.
   if (url.origin === self.location.origin) {
     event.respondWith(
       caches.match(req).then(function (hit) {
-        return hit || fetch(req).then(function (res) {
-          if (res && res.ok) {
+        var red = fetch(req).then(function (res) {
+          if (res && res.ok && res.type === 'basic') {
             var copy = res.clone();
             caches.open(VERSION).then(function (c) { c.put(req, copy); });
           }
           return res;
-        });
+        }).catch(function () { return hit; });
+        return hit || red;
       })
     );
     return;

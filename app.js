@@ -109,31 +109,55 @@ function imgUrl(id, n) {
   return frameCount() <= 1 ? (base + id + ext) : (base + id + '/' + (n || 0) + ext);
 }
 
-/* ═══ 2. ALMACENAMIENTO ═══════════════════════════════════════════════════ */
+/* ═══ 2. ALMACENAMIENTO ═══════════════════════════════════════════════════
+   IndexedDB por medio del núcleo (app-core.js). Los datos del formato viejo
+   de localStorage se migran al abrir, sin borrar nada: quedan de respaldo. */
 
-var K = {
-  users: 'hierro.v1.users',
-  session: 'hierro.v1.session',
-  user: function (id) { return 'hierro.v1.user.' + id; },
-};
+var CORE = window.HIERRO_CORE;
+var guardadoPendiente = null;
 
-var Store = {
-  get: function (key, fallback) {
-    try { var raw = localStorage.getItem(key); return raw ? JSON.parse(raw) : fallback; }
-    catch (e) { return fallback; }
-  },
-  set: function (key, value) {
-    try { localStorage.setItem(key, JSON.stringify(value)); return true; }
-    catch (e) { toast('No se pudo guardar: el almacenamiento del navegador está lleno o bloqueado.', 'error'); return false; }
-  },
-  del: function (key) { try { localStorage.removeItem(key); } catch (e) {} },
-};
+/* Señal de "app lista": se resuelve cuando terminó de abrir la base y de
+   pintar la primera pantalla. La usa la prueba automática y cualquier
+   integración que necesite esperar a que HIERRO esté operativo. */
+var readyResolve = null;
+var readyPromise = new Promise(function (res) { readyResolve = res; });
+/* Traza del arranque: solo para diagnóstico de la prueba automática. */
+var bootTrace = [];
+function paso(nombre) { bootTrace.push(nombre); }
+
+/* Guarda el documento del usuario activo.
+   `saveData()` escribe YA: con IndexedDB una escritura agrupada puede quedar a
+   medio camino si el usuario cierra la app, y perder el último toque no es
+   aceptable. `saveDataSoon()` se usa solo mientras alguien escribe un peso, que
+   es el único caso en que se dispara muchas veces por segundo. */
+function escribirDocumento() {
+  guardadoPendiente = null;
+  if (!state.account || !state.data) return;
+  state.data.userId = state.account.id;
+  CORE.store.saveDocument(state.data).catch(function () {
+    toast('No se pudieron guardar los datos. Exportá una copia desde Perfil.', 'error');
+  });
+}
+
+function saveData() {
+  if (guardadoPendiente) { clearTimeout(guardadoPendiente); guardadoPendiente = null; }
+  escribirDocumento();
+}
+
+function saveDataSoon() {
+  if (guardadoPendiente) clearTimeout(guardadoPendiente);
+  guardadoPendiente = setTimeout(escribirDocumento, 400);
+}
+
+function flushSave() {
+  if (guardadoPendiente) { clearTimeout(guardadoPendiente); guardadoPendiente = null; escribirDocumento(); }
+}
 
 /* ═══ 3. ESTADO Y SESIONES ════════════════════════════════════════════════ */
 
 var state = {
   users: [],
-  account: null,   // cuenta activa (id, name, hash, salt, profile)
+  account: null,   // cuenta activa (id, name, role, salt, hash, iterations, profile)
   data: null,      // datos del usuario activo
   view: 'hoy',
   filter: null,    // filtro de objetivo en la pantalla de entrenar
@@ -141,8 +165,11 @@ var state = {
   newSessionDate: todayISO(),  // día que se está por entrenar
   calcWeight: 60,              // peso de la calculadora de discos
   picker: { q: '', muscle: '' }, // estado del selector de ejercicios
-  pendingObjetivo: null,  // elección provisional mientras se crea un perfil
+  pendingObjetivo: null,  // elección provisional mientras se crea un usuario
   pendingNivel: null,
+  migrated: false,        // la base se migró del formato viejo en esta apertura
+  altaPendiente: null,    // paquete de alta recibido por enlace
+  backups: null,          // respaldos automáticos del dispositivo (solo admin)
   _sheetEntry: null,      // ejercicio cuya hoja de técnica está abierta
   _stamp: null,           // serie recién marcada, para animar el check tras el render
 };
@@ -164,24 +191,33 @@ function blankData(profile) {
     bodyweight: [],
     activeSession: null,
     lastRoutine: null,
+    customExercises: [],
   };
 }
 
-function saveData() { if (state.account) Store.set(K.user(state.account.id), state.data); }
-function saveUsers() { Store.set(K.users, state.users); }
-
+/* Carga los datos del usuario activo. Asíncrono: la base es IndexedDB. */
 function loadAccount(id) {
   var acc = null;
   for (var i = 0; i < state.users.length; i++) if (state.users[i].id === id) acc = state.users[i];
-  if (!acc) return false;
+  if (!acc) return Promise.resolve(false);
   state.account = acc;
-  state.data = Store.get(K.user(id), null) || blankData(acc.profile);
-  if (!state.data.profile) state.data.profile = acc.profile;
-  // Las preferencias nuevas se suman a los perfiles que ya existían.
-  state.data.prefs = Object.assign(defaultPrefs(), state.data.prefs || {});
-  Store.set(K.user(id), state.data);
-  Store.set(K.session, id);
-  return true;
+  return CORE.store.document(id).then(function (doc) {
+    state.data = doc || blankData(acc.profile);
+    state.data.userId = id;
+    if (!state.data.profile) state.data.profile = acc.profile;
+    // Las preferencias nuevas se suman a los perfiles que ya existían.
+    state.data.prefs = Object.assign(defaultPrefs(), state.data.prefs || {});
+    return CORE.store.setSessionId(id);
+  }).then(function () { return true; });
+}
+
+function cerrarSesionLocal() {
+  state.account = null;
+  state.data = null;
+  state._sheetEntry = null;
+  if (guardadoPendiente) { clearTimeout(guardadoPendiente); guardadoPendiente = null; }
+  Rest.stop();
+  return CORE.store.setSessionId(null);
 }
 
 /* Rutina sugerida: la del objetivo y el nivel del perfil, priorizando las
@@ -376,76 +412,101 @@ function toggleSet(entryIdx, setIdx) {
   render();
 }
 
-/* ═══ 4. CUENTAS LOCALES ══════════════════════════════════════════════════
-   El hash protege el perfil de otro usuario del mismo dispositivo. No es
-   seguridad real: los datos viven en el navegador y son legibles. */
+/* ═══ 4. USUARIOS Y ACCESO ════════════════════════════════════════════════
+   No hay alta propia: los usuarios los crea el administrador de este
+   dispositivo (o recibe un enlace de alta desde otro dispositivo). Las
+   contraseñas se guardan derivadas con PBKDF2-SHA256 y sal por usuario; la
+   contraseña en claro no se almacena ni viaja nunca. */
 
-function hashPass(pass, salt) {
-  var text = salt + '::' + pass;
-  if (window.crypto && window.crypto.subtle && window.TextEncoder) {
-    return window.crypto.subtle.digest('SHA-256', new TextEncoder().encode(text)).then(function (buf) {
-      return Array.prototype.map.call(new Uint8Array(buf), function (b) { return b.toString(16).padStart(2, '0'); }).join('');
-    });
-  }
-  // Respaldo para contextos sin Web Crypto (por ejemplo, abierto como archivo local).
-  var h1 = 2166136261, h2 = 5381;
-  for (var i = 0; i < text.length; i++) {
-    var c = text.charCodeAt(i);
-    h1 = (h1 ^ c) * 16777619 >>> 0;
-    h2 = ((h2 << 5) + h2 + c) >>> 0;
-  }
-  return Promise.resolve('f' + h1.toString(16) + h2.toString(16));
+function usuarioPorNombre(nombre) {
+  var n = String(nombre || '').trim().toLowerCase();
+  return state.users.filter(function (u) {
+    return u.id === nombre || u.name.toLowerCase() === n;
+  })[0] || null;
 }
 
-function register(ev) {
+function esAdmin() { return !!(state.account && state.account.role === 'admin'); }
+
+/* Crea un usuario y su documento de datos. Devuelve el usuario creado. */
+function crearUsuario(nombre, password, rol, profile) {
+  return CORE.crypto.newCredential(password).then(function (cred) {
+    var user = CORE.validate.validateUser({
+      id: uid(), name: nombre.trim(), role: rol === 'admin' ? 'admin' : 'user',
+      salt: cred.salt, hash: cred.hash, iterations: cred.iterations,
+      createdAt: Date.now(), profile: profile || null,
+    });
+    if (!user) throw new Error('datos de usuario inválidos');
+    return CORE.store.saveUser(user).then(function () {
+      var doc = blankData(user.profile || { name: user.name });
+      state.users.push(user);
+      return CORE.store.saveDocument(CORE.validate.validateDocument(doc, user.id)).then(function () { return user; });
+    });
+  });
+}
+
+/* Alta del administrador en un dispositivo sin usuarios: es el único alta que
+   puede hacer alguien que todavía no entró, y por eso queda como admin. */
+function altaAdministrador(ev) {
   ev.preventDefault();
   var name = $('#regName').value.trim();
   var pass = $('#regPass').value;
-  var peso = parseFloat($('#regWeight').value) || 70;
+  var peso = parseFloat(String($('#regWeight').value).replace(',', '.')) || 70;
   var altura = parseFloat($('#regHeight').value) || 0;
   var objetivo = state.pendingObjetivo || 'hipertrofia';
   var nivel = state.pendingNivel || 'Principiante';
+
   if (name.length < 2) return formError('#regError', 'Escribí un nombre de al menos 2 letras.');
   if (pass.length < 4) return formError('#regError', 'La contraseña necesita al menos 4 caracteres.');
-  if (state.users.some(function (u) { return u.name.toLowerCase() === name.toLowerCase(); })) {
-    return formError('#regError', 'Ya existe un perfil con ese nombre en este dispositivo.');
-  }
+  if (usuarioPorNombre(name)) return formError('#regError', 'Ya existe un usuario con ese nombre.');
 
-  var salt = uid() + uid();
-  hashPass(pass, salt).then(function (hash) {
-    var account = {
-      id: uid(), name: name, salt: salt, hash: hash, createdAt: Date.now(),
-      profile: { name: name, weightKg: peso, heightCm: altura, objetivo: objetivo, level: nivel, days: 3 },
-    };
-    state.users.push(account);
-    saveUsers();
-    loadAccount(account.id);
-    // La próxima persona que cree un perfil en este dispositivo arranca de cero.
-    state.pendingObjetivo = null;
-    state.pendingNivel = null;
+  var profile = { name: name, weightKg: peso, heightCm: altura, objetivo: objetivo, level: nivel, days: 3 };
+  crearUsuario(name, pass, 'admin', profile).then(function (user) {
+    return loadAccount(user.id);
+  }).then(function () {
     go('#/hoy');
-    toast('Perfil creado. ¡A entrenar!', 'sign');
+    toast('Administrador creado. Ya podés dar de alta a los demás desde Perfil.', 'sign');
+  }).catch(function (e) {
+    formError('#regError', 'No se pudo crear el usuario: ' + e.message);
   });
 }
 
 function login(ev) {
   ev.preventDefault();
+  var aviso = $('#loginError');
+  if (aviso) aviso.hidden = true;   // cada intento limpia el aviso anterior
   var typed = ($('#loginUser').value || '').trim();
   var pass = $('#loginPass').value;
-  if (!typed) return formError('#loginError', 'Escribí el nombre de tu perfil.');
-  // Se acepta el nombre (como se escribe) o el id interno, por compatibilidad.
-  var acc = state.users.filter(function (u) {
-    return u.id === typed || u.name.toLowerCase() === typed.toLowerCase();
-  })[0];
-  if (!acc) return formError('#loginError', 'En este dispositivo no hay ningún perfil con ese nombre.');
-  hashPass(pass, acc.salt).then(function (hash) {
-    if (hash !== acc.hash) return formError('#loginError', 'Contraseña incorrecta.');
-    loadAccount(acc.id);
-    go('#/hoy');
+  if (!typed) return formError('#loginError', 'Escribí tu usuario.');
+  var acc = usuarioPorNombre(typed);
+  if (!acc) return formError('#loginError', 'En este dispositivo no hay ningún usuario con ese nombre. Los da de alta el administrador.');
+  if (acc.disabled) return formError('#loginError', 'Ese usuario está desactivado. Pedile al administrador que lo habilite.');
+
+  // Las cuentas del formato viejo tenían otra derivación: se aceptan una vez
+  // y se actualizan a PBKDF2 sin que el usuario tenga que hacer nada.
+  var esVieja = !acc.iterations;
+  var verificar = esVieja ? CORE.crypto.verifyLegacy(pass, acc) : CORE.crypto.verifyCredential(pass, acc);
+
+  verificar.then(function (ok) {
+    if (!ok) return formError('#loginError', 'Contraseña incorrecta.');
+    var actualizar = esVieja
+      ? CORE.crypto.newCredential(pass).then(function (c) {
+          acc.salt = c.salt; acc.hash = c.hash; acc.iterations = c.iterations;
+        })
+      : Promise.resolve();
+    return actualizar.then(function () {
+      acc.lastLogin = new Date().toISOString();
+      return CORE.store.saveUser(acc);
+    }).then(function () { return loadAccount(acc.id); }).then(function () {
+      go('#/hoy');
+      render();
+      if (esVieja) toast('Contraseña actualizada al formato nuevo.', 'sign');
+    });
+  }).catch(function (e) {
+    formError('#loginError', 'No se pudo validar el acceso: ' + e.message);
   });
 }
 
-/* Cambio de contraseña: la cuenta es local, así que el usuario manda. */
+/* Cambio de contraseña propio. */
 function changePassword(ev) {
   ev.preventDefault();
   var a = $('#newPass').value;
@@ -454,24 +515,28 @@ function changePassword(ev) {
   err.hidden = true;
   if (a.length < 4) { err.textContent = 'La contraseña necesita al menos 4 caracteres.'; err.hidden = false; return; }
   if (a !== b) { err.textContent = 'Las dos contraseñas no coinciden.'; err.hidden = false; return; }
-  hashPass(a, state.account.salt).then(function (hash) {
-    state.account.hash = hash;
-    saveUsers();
+  CORE.crypto.newCredential(a).then(function (cred) {
+    state.account.salt = cred.salt;
+    state.account.hash = cred.hash;
+    state.account.iterations = cred.iterations;
+    return CORE.store.saveUser(state.account);
+  }).then(function () {
     $('#passForm').hidden = true;
     $('#newPass').value = '';
     $('#newPass2').value = '';
     toast('Contraseña actualizada. Usala la próxima vez que entres.', 'sign');
+  }).catch(function (e) {
+    err.textContent = 'No se pudo cambiar: ' + e.message;
+    err.hidden = false;
   });
 }
 
 function logout() {
-  state.account = null;
-  state.data = null;
-  state._sheetEntry = null;
-  Rest.stop();
-  Store.del(K.session);
-  go('#/acceso');
-  toast('Sesión cerrada.');
+  flushSave();
+  cerrarSesionLocal().then(function () {
+    go('#/acceso');
+    toast('Sesión cerrada.');
+  });
 }
 
 function formError(sel, msg) {
@@ -1023,24 +1088,47 @@ function textoInstalar() {
     'de direcciones, o el botón de la barra superior de la app.';
 }
 
-/* ── 8.1 Acceso ───────────────────────────────────────────────────────── */
+/* ── 8.1 Acceso ───────────────────────────────────────────────────────────
+   Sin alta propia: los usuarios los crea el administrador. Lo único que se
+   puede hacer desde acá sin credenciales es el alta del administrador en un
+   dispositivo que todavía no tiene ninguno, y aceptar un enlace de alta. */
 
 function viewGate() {
   var hasUsers = state.users.length > 0;
-  var tabs = '<div class="gate__tabs" role="tablist" aria-label="Acceso">' +
-    '<button class="gate__tab" role="tab" id="tabLogin" aria-controls="panelLogin" aria-selected="true" data-act="gate-tab" data-tab="login">Entrar</button>' +
-    '<button class="gate__tab" role="tab" id="tabRegister" aria-controls="panelRegister" aria-selected="false" data-act="gate-tab" data-tab="register">Crear perfil</button>' +
+
+  var band = '<div class="gate__band"><i class="fa-solid fa-dumbbell"></i><span>Tu progreso queda en este dispositivo</span></div>';
+  var cabeza = '<div>' +
+    '<h1 class="gate__word">HIERRO</h1>' +
+    '<p class="gate__claim">Registrá cada serie en tres toques. La app te dice qué discos cargar en cada lado de la barra.</p>' +
   '</div>';
 
+  /* Enlace de alta recibido desde otro dispositivo. */
+  if (state.altaPendiente) {
+    var p = state.altaPendiente;
+    var yaEsta = !!usuarioPorNombre(p.name);
+    return '<div class="gate">' + cabeza + band +
+      '<div class="gate__panel">' +
+        '<h2 class="gate__h2">' + (yaEsta ? 'Ese usuario ya existe en este dispositivo' : 'Agregar esta cuenta') + '</h2>' +
+        '<p class="gate__note">Usuario <b>' + esc(p.name) + '</b>' + (p.role === 'admin' ? ' · administrador' : '') + '.</p>' +
+        '<p class="gate__note">La contraseña te la da quien te dio de alta: no viaja en este enlace.</p>' +
+        '<div style="display:grid;gap:9px;margin-top:14px">' +
+          '<button class="btn btn--sign btn--block" data-act="alta-aceptar">' +
+            '<i class="fa-solid fa-user-check"></i> ' + (yaEsta ? 'Actualizar la credencial' : 'Agregar la cuenta') + '</button>' +
+          '<button class="btn btn--ghost btn--block" data-act="alta-cancelar">Cancelar</button>' +
+        '</div>' +
+      '</div>' +
+    '</div>';
+  }
+
   var loginPanel =
-    '<form class="form" data-form="login" role="tabpanel" id="panelLogin" aria-labelledby="tabLogin" ' + (hasUsers ? '' : 'hidden') + '>' +
+    '<form class="form" data-form="login" id="panelLogin">' +
+      '<h2 class="gate__h2">Entrar</h2>' +
       '<div class="field">' +
-        '<label class="field__label" for="loginUser">Tu nombre de perfil</label>' +
-        '<input class="input" id="loginUser" list="loginPerfiles" autocomplete="username" placeholder="Escribí tu nombre">' +
-        '<datalist id="loginPerfiles">' +
-          state.users.map(function (u) { return '<option value="' + esc(u.name) + '"></option>'; }).join('') +
+        '<label class="field__label" for="loginUser">Usuario</label>' +
+        '<input class="input" id="loginUser" list="loginUsuarios" autocomplete="username" placeholder="Tu usuario">' +
+        '<datalist id="loginUsuarios">' +
+          state.users.filter(function (u) { return !u.disabled; }).map(function (u) { return '<option value="' + esc(u.name) + '"></option>'; }).join('') +
         '</datalist>' +
-        '<span class="field__hint">Escribí tu nombre o elegilo de la lista de este dispositivo.</span>' +
       '</div>' +
       '<div class="field">' +
         '<label class="field__label" for="loginPass">Contraseña</label>' +
@@ -1048,9 +1136,9 @@ function viewGate() {
       '</div>' +
       '<p class="alert alert--error" id="loginError" hidden></p>' +
       '<button class="btn btn--sign btn--block" type="submit"><i class="fa-solid fa-arrow-right-to-bracket"></i> Entrar</button>' +
-      '<p class="gate__note">¿Primera vez en este navegador? ' +
-        '<button type="button" class="link-btn" data-act="gate-tab" data-tab="register">Creá tu perfil acá</button>.</p>' +
-      '<p class="gate__note">Las cuentas viven en este navegador. No se envían a ningún servidor.</p>' +
+      '<p class="gate__note">Los usuarios los da de alta el administrador de este dispositivo. ' +
+        'Si te dieron un enlace de alta, abrilo en este navegador.</p>' +
+      '<p class="gate__note">Las cuentas y los entrenamientos viven en este dispositivo. No se envían a ningún servidor.</p>' +
     '</form>';
 
   var objetivos = Object.keys(RT.objetivos).map(function (o) {
@@ -1066,14 +1154,16 @@ function viewGate() {
       '<span class="choice__mark"></span><span class="choice__name">' + n + '</span></button>';
   }).join('');
 
-  var registerPanel =
-    '<form class="form" data-form="register" role="tabpanel" id="panelRegister" aria-labelledby="tabRegister" ' + (hasUsers ? 'hidden' : '') + '>' +
-      (hasUsers ? '' : '<h2 class="gate__h2">Creá tu perfil</h2><p class="gate__note">Es la primera vez en este dispositivo. Elegí un nombre y una contraseña; con eso entrás las próximas veces.</p>') +
-      '<div class="field"><label class="field__label" for="regName">Tu nombre</label>' +
-        '<input class="input" id="regName" autocomplete="name" required></div>' +
+  var altaAdminPanel =
+    '<form class="form" data-form="alta-admin">' +
+      '<h2 class="gate__h2">Alta del administrador</h2>' +
+      '<p class="gate__note">Este dispositivo todavía no tiene usuarios. La primera cuenta es la del ' +
+        '<b>administrador</b>: desde ella vas a dar de alta a los demás, con su usuario y su contraseña.</p>' +
+      '<div class="field"><label class="field__label" for="regName">Usuario</label>' +
+        '<input class="input" id="regName" autocomplete="username" required></div>' +
       '<div class="field"><label class="field__label" for="regPass">Contraseña</label>' +
         '<input class="input" id="regPass" type="password" autocomplete="new-password" required>' +
-        '<span class="field__hint">Separa tu perfil del de otras personas en este dispositivo.</span></div>' +
+        '<span class="field__hint">Mínimo 4 caracteres. Se guarda cifrada con PBKDF2 y sal propia: la contraseña en claro no se almacena.</span></div>' +
       '<div class="grid-2">' +
         '<div class="field"><label class="field__label" for="regWeight">Peso (kg)</label>' +
           '<input class="input" id="regWeight" type="text" inputmode="decimal" value="75"></div>' +
@@ -1083,18 +1173,11 @@ function viewGate() {
       '<div class="field"><span class="field__label" id="lblObjetivo">Objetivo principal</span><div class="choice" role="group" aria-labelledby="lblObjetivo">' + objetivos + '</div></div>' +
       '<div class="field"><span class="field__label" id="lblNivel">Experiencia</span><div class="choice" role="group" aria-labelledby="lblNivel">' + niveles + '</div></div>' +
       '<p class="alert alert--error" id="regError" hidden></p>' +
-      '<button class="btn btn--sign btn--block" type="submit"><i class="fa-solid fa-user-plus"></i> Crear perfil y empezar</button>' +
+      '<button class="btn btn--sign btn--block" type="submit"><i class="fa-solid fa-user-shield"></i> Crear administrador</button>' +
     '</form>';
 
-  return '<div class="gate">' +
-    '<div>' +
-      '<h1 class="gate__word">HIERRO</h1>' +
-      '<p class="gate__claim">Registrá cada serie en tres toques. La app te dice qué discos cargar en cada lado de la barra.</p>' +
-    '</div>' +
-    '<div class="gate__band"><i class="fa-solid fa-dumbbell"></i><span>Tu progreso queda en este dispositivo</span></div>' +
-    (hasUsers
-      ? tabs + '<div class="gate__panel">' + loginPanel + registerPanel + '</div>'
-      : '<div class="gate__panel">' + registerPanel + '</div>') +
+  return '<div class="gate">' + cabeza + band +
+    '<div class="gate__panel">' + (hasUsers ? loginPanel : altaAdminPanel) + '</div>' +
     (enModoApp() ? '' : '<div class="alert">' + textoInstalar() + '</div>') +
   '</div>';
 }
@@ -1541,8 +1624,79 @@ function lineChart(values, labels) {
 
 /* ── 8.5 Perfil ───────────────────────────────────────────────────────── */
 
+/* ── Panel de usuarios (solo administrador) ───────────────────────────────
+   El administrador da de alta, restablece contraseñas, desactiva y borra.
+   NO puede leer los entrenamientos de nadie: cada documento es de su dueño. */
+function usuariosAdminHtml() {
+  var filas = state.users.map(function (u) {
+    var soyYo = state.account.id === u.id;
+    var ultimo = u.lastLogin ? 'último ingreso ' + esc(fmtDayShort(String(u.lastLogin).slice(0, 10))) : 'todavía no entró';
+    return '<div class="row-link">' +
+      '<span class="row-link__icon"><i class="fa-solid ' + (u.role === 'admin' ? 'fa-user-shield' : 'fa-user') + '"></i></span>' +
+      '<span class="row-link__text">' +
+        '<span class="row-link__name">' + esc(u.name) + (soyYo ? ' <span class="tag tag--live">vos</span>' : '') + '</span>' +
+        '<span class="row-link__desc">' + (u.role === 'admin' ? 'administrador' : 'usuario') +
+          (u.disabled ? ' · desactivado' : '') + ' · ' + ultimo + '</span>' +
+      '</span>' +
+      '<span class="unit__foot-set">' +
+        '<button class="btn btn--sm btn--ghost" data-act="u-pass" data-user="' + u.id + '">Contraseña</button>' +
+        '<button class="btn btn--sm btn--ghost" data-act="u-enlace" data-user="' + u.id + '">Enlace</button>' +
+        (soyYo ? '' : '<button class="btn btn--sm btn--ghost" data-act="u-toggle" data-user="' + u.id + '">' + (u.disabled ? 'Activar' : 'Desactivar') + '</button>') +
+        (soyYo ? '' : '<button class="btn btn--sm btn--danger" data-act="u-borrar" data-user="' + u.id + '">Borrar</button>') +
+      '</span>' +
+    '</div>';
+  }).join('');
+
+  var respaldos = state.backups && state.backups.length
+    ? state.backups.map(function (b) {
+        var cuando = new Date(b.at).toLocaleString('es-AR', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
+        return '<div class="row-link">' +
+          '<span class="row-link__icon"><i class="fa-solid fa-clock-rotate-left"></i></span>' +
+          '<span class="row-link__text"><span class="row-link__name">' + esc(cuando) + '</span>' +
+          '<span class="row-link__desc">' + b.users.length + ' usuarios · ' + b.documents.length + ' historiales</span></span>' +
+          '<span class="unit__foot-set"><button class="btn btn--sm btn--ghost" data-act="bk-restore" data-bk="' + esc(b.id) + '">Restaurar</button></span>' +
+        '</div>';
+      }).join('')
+    : '<p class="gate__note" style="padding:10px 14px">Todavía no hay respaldos automáticos. Se guarda uno por día al abrir la app.</p>';
+
+  return '<div class="section"><div class="section__head"><h2 class="section__title">Usuarios</h2>' +
+      '<span class="section__note">' + state.users.length + ' en este dispositivo</span></div>' +
+      '<div class="rows">' + filas + '</div>' +
+      '<div class="alert" style="margin-top:10px">Vos das de alta a los usuarios de este dispositivo con su usuario y su contraseña. ' +
+        'Cada persona ve solo sus entrenamientos: nadie más puede leerlos, ni siquiera el administrador.</div>' +
+
+      '<form class="form" data-form="nuevo-usuario" style="margin-top:14px">' +
+        '<h3 class="gate__h2">Alta de usuario</h3>' +
+        '<div class="grid-2">' +
+          '<div class="field"><label class="field__label" for="nuNombre">Usuario</label>' +
+            '<input class="input" id="nuNombre" autocomplete="off" required></div>' +
+          '<div class="field"><label class="field__label" for="nuClave">Contraseña</label>' +
+            '<input class="input" id="nuClave" type="text" autocomplete="off" required></div>' +
+        '</div>' +
+        '<label class="choice__opt"><input type="checkbox" id="nuAdmin" style="width:18px;height:18px;flex:none">' +
+          '<span><span class="choice__name">También administrador</span>' +
+          '<span class="choice__desc">Va a poder dar de alta a otros usuarios de este dispositivo</span></span></label>' +
+        '<p class="alert alert--error" id="nuError" hidden></p>' +
+        '<button class="btn btn--sign btn--block" type="submit"><i class="fa-solid fa-user-plus"></i> Dar de alta</button>' +
+      '</form>' +
+
+      '<div class="rows" style="margin-top:14px">' +
+        '<button class="row-link" data-act="backup-full"><span class="row-link__icon"><i class="fa-solid fa-box-archive"></i></span>' +
+          '<span class="row-link__text"><span class="row-link__name">Respaldo completo del dispositivo</span>' +
+          '<span class="row-link__desc">Todos los usuarios y todos los historiales, en un JSON</span></span></button>' +
+        '<button class="row-link" data-act="restore-full"><span class="row-link__icon"><i class="fa-solid fa-upload"></i></span>' +
+          '<span class="row-link__text"><span class="row-link__name">Restaurar respaldo completo</span>' +
+          '<span class="row-link__desc">Vuelve atrás usuarios e historiales desde un archivo</span></span></button>' +
+      '</div>' +
+
+      '<h3 class="gate__h2" style="margin-top:16px">Respaldos automáticos</h3>' +
+      '<div class="rows">' + respaldos + '</div>' +
+    '</div>';
+}
+
 function viewProfile() {
   var d = state.data, p = d.profile, prefs = d.prefs;
+  if (esAdmin() && state.backups === null) cargarBackups();
   var objetivos = Object.keys(RT.objetivos).map(function (o) {
     return '<button type="button" class="chip" data-act="set-objetivo" data-value="' + o + '" aria-pressed="' + (p.objetivo === o) + '">' + esc(RT.objetivos[o].label) + '</button>';
   }).join('');
@@ -1599,12 +1753,15 @@ function viewProfile() {
       '<div class="plateload" id="calcPlates" style="margin-top:12px">' + platesBlockHtml(state.calcWeight) + '</div>' +
     '</div>' +
 
+    (esAdmin() ? usuariosAdminHtml() : '') +
+
     '<div class="section"><div class="section__head"><h2 class="section__title">Datos</h2><span class="section__note">todo queda en este navegador</span></div>' +
       '<div class="rows">' +
-        '<button class="row-link" data-act="pass-toggle"><span class="row-link__icon"><i class="fa-solid fa-key"></i></span><span class="row-link__text"><span class="row-link__name">Cambiar contraseña</span><span class="row-link__desc">Solo separa perfiles en este dispositivo</span></span></button>' +
-        '<button class="row-link" data-act="export"><span class="row-link__icon"><i class="fa-solid fa-file-export"></i></span><span class="row-link__text"><span class="row-link__name">Exportar copia</span><span class="row-link__desc">Descarga un archivo JSON con tu historial</span></span></button>' +
-        '<button class="row-link" data-act="import"><span class="row-link__icon"><i class="fa-solid fa-file-import"></i></span><span class="row-link__text"><span class="row-link__name">Importar copia</span><span class="row-link__desc">Reemplaza los datos de este perfil</span></span></button>' +
-        '<button class="row-link" data-act="wipe"><span class="row-link__icon"><i class="fa-solid fa-trash"></i></span><span class="row-link__text"><span class="row-link__name">Borrar mis datos</span><span class="row-link__desc">Sesiones, récords y peso corporal</span></span></button>' +
+        '<button class="row-link" data-act="pass-toggle"><span class="row-link__icon"><i class="fa-solid fa-key"></i></span><span class="row-link__text"><span class="row-link__name">Cambiar mi contraseña</span><span class="row-link__desc">Se guarda cifrada con PBKDF2 y sal propia</span></span></button>' +
+        '<button class="row-link" data-act="export"><span class="row-link__icon"><i class="fa-solid fa-file-export"></i></span><span class="row-link__text"><span class="row-link__name">Exportar mis datos</span><span class="row-link__desc">JSON con tu historial completo</span></span></button>' +
+        '<button class="row-link" data-act="export-csv"><span class="row-link__icon"><i class="fa-solid fa-table"></i></span><span class="row-link__text"><span class="row-link__name">Exportar historial (CSV)</span><span class="row-link__desc">Una fila por serie, para Excel o Google Sheets</span></span></button>' +
+        '<button class="row-link" data-act="import"><span class="row-link__icon"><i class="fa-solid fa-file-import"></i></span><span class="row-link__text"><span class="row-link__name">Importar copia</span><span class="row-link__desc">JSON de HIERRO o CSV del historial</span></span></button>' +
+        '<button class="row-link" data-act="wipe"><span class="row-link__icon"><i class="fa-solid fa-trash"></i></span><span class="row-link__text"><span class="row-link__name">Borrar mis entrenamientos</span><span class="row-link__desc">Sesiones, récords y peso corporal. La cuenta queda</span></span></button>' +
         '<button class="row-link" data-act="logout"><span class="row-link__icon"><i class="fa-solid fa-right-from-bracket"></i></span><span class="row-link__text"><span class="row-link__name">Cerrar sesión</span><span class="row-link__desc">Volver a la pantalla de acceso</span></span></button>' +
       '</div>' +
       '<form class="form" data-form="password" id="passForm" hidden style="margin-top:12px">' +
@@ -1965,7 +2122,65 @@ document.addEventListener('click', function (ev) {
       break;
 
     case 'export': exportData(); break;
+    case 'export-csv': exportCsv(); break;
+    case 'backup-full': exportFullBackup(); break;
+    case 'restore-full': restoreFullBackup(); break;
     case 'import': importData(); break;
+
+    case 'alta-aceptar':
+      if (!state.altaPendiente) { render(); break; }
+      importarPaqueteAlta(state.altaPendiente).then(function (u) {
+        state.altaPendiente = null;
+        render();
+        toast('Cuenta de ' + u.name + ' lista. Entrá con la contraseña que te dieron.', 'sign');
+      }).catch(function (e) { toast('No se pudo agregar: ' + e.message, 'error'); });
+      break;
+
+    case 'alta-cancelar':
+      state.altaPendiente = null;
+      render();
+      break;
+
+    case 'bk-restore':
+      var bkId = el.getAttribute('data-bk');
+      if (confirm('Se reemplazan los datos actuales por los de ese respaldo. ¿Seguir?')) {
+        CORE.store.restoreSnapshot(bkId).then(function () {
+          return CORE.store.users();
+        }).then(function (users) {
+          state.users = users;
+          return state.account ? loadAccount(state.account.id) : null;
+        }).then(function () {
+          render();
+          toast('Respaldo restaurado.', 'sign');
+        }).catch(function (e) { toast('No se pudo restaurar: ' + e.message, 'error'); });
+      }
+      break;
+
+    case 'u-pass': restablecerPassword(el.getAttribute('data-user')); break;
+
+    case 'u-enlace':
+      var uEnlace = state.users.filter(function (x) { return x.id === el.getAttribute('data-user'); })[0];
+      if (uEnlace) {
+        var link = enlaceDeAlta(uEnlace);
+        copiarTexto(link).then(function (ok) {
+          if (ok) toast('Enlace copiado. Pasáselo junto con la contraseña.', 'sign');
+          else prompt('Copiá el enlace de alta de ' + uEnlace.name + ':', link);
+        });
+      }
+      break;
+
+    case 'u-toggle':
+      var uTog = state.users.filter(function (x) { return x.id === el.getAttribute('data-user'); })[0];
+      if (uTog) {
+        uTog.disabled = !uTog.disabled;
+        CORE.store.saveUser(uTog).then(function () {
+          render();
+          toast(uTog.name + (uTog.disabled ? ' desactivado.' : ' activado.'));
+        });
+      }
+      break;
+
+    case 'u-borrar': borrarUsuario(el.getAttribute('data-user')); break;
 
     case 'pass-toggle':
       var passForm = $('#passForm');
@@ -2219,9 +2434,10 @@ document.addEventListener('keydown', function (ev) {
 document.addEventListener('submit', function (ev) {
   ev.preventDefault();
   var form = ev.target.getAttribute('data-form');
-  if (form === 'register') register(ev);
+  if (form === 'alta-admin') altaAdministrador(ev);
   else if (form === 'login') login(ev);
   else if (form === 'password') changePassword(ev);
+  else if (form === 'nuevo-usuario') altaDeUsuario(ev);
 });
 
 /* Botones fijos de la cabecera. */
@@ -2242,48 +2458,207 @@ $('#nextband').addEventListener('click', function (ev) {
 });
 
 /* Copia de seguridad. */
+/* ── Respaldos y administración de usuarios ───────────────────────────── */
+
+function cargarBackups() {
+  state.backups = [];
+  CORE.store.backups().then(function (list) {
+    state.backups = list;
+    if (state.view === 'perfil') render();
+  }).catch(function () { state.backups = []; });
+}
+
+function unRespaldoPorDia() {
+  return CORE.store.backups().then(function (list) {
+    var hoy = todayISO();
+    var yaHay = list.some(function (b) { return todayISO(new Date(b.at)) === hoy; });
+    if (yaHay) return null;
+    return CORE.store.snapshot('automático');
+  });
+}
+
+/* Enlace de alta: lleva la cuenta a otro dispositivo sin backend. Contiene la
+   sal y la derivación (nunca la contraseña), así que se trata como credencial. */
+function enlaceDeAlta(user) {
+  var code = CORE.packs.packAccount(user);
+  return location.origin + location.pathname + '#alta=' + code;
+}
+
+function copiarTexto(texto) {
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    return navigator.clipboard.writeText(texto).then(function () { return true; }).catch(function () { return false; });
+  }
+  return Promise.resolve(false);
+}
+
+function altaDeUsuario(ev) {
+  ev.preventDefault();
+  var nombre = $('#nuNombre').value.trim();
+  var clave = $('#nuClave').value;
+  var rol = $('#nuAdmin').checked ? 'admin' : 'user';
+  var err = $('#nuError');
+  err.hidden = true;
+  if (nombre.length < 2) { err.textContent = 'El usuario necesita al menos 2 letras.'; err.hidden = false; return; }
+  if (clave.length < 4) { err.textContent = 'La contraseña necesita al menos 4 caracteres.'; err.hidden = false; return; }
+  if (usuarioPorNombre(nombre)) { err.textContent = 'Ya existe un usuario con ese nombre.'; err.hidden = false; return; }
+
+  crearUsuario(nombre, clave, rol, null).then(function () {
+    return CORE.store.snapshot('antes del alta de ' + nombre).catch(function () { return null; });
+  }).then(function () {
+    $('#nuNombre').value = '';
+    $('#nuClave').value = '';
+    $('#nuAdmin').checked = false;
+    render();
+    toast('Usuario ' + nombre + ' dado de alta. Pasale la contraseña.', 'sign');
+  }).catch(function (e) {
+    err.textContent = 'No se pudo dar de alta: ' + e.message;
+    err.hidden = false;
+  });
+}
+
+function restablecerPassword(userId) {
+  var u = state.users.filter(function (x) { return x.id === userId; })[0];
+  if (!u) return;
+  var nueva = prompt('Contraseña nueva para ' + u.name + ' (mínimo 4 caracteres):', '');
+  if (nueva == null) return;
+  if (nueva.length < 4) { toast('La contraseña necesita al menos 4 caracteres.', 'error'); return; }
+  CORE.crypto.newCredential(nueva).then(function (cred) {
+    u.salt = cred.salt; u.hash = cred.hash; u.iterations = cred.iterations;
+    return CORE.store.saveUser(u);
+  }).then(function () {
+    toast('Contraseña de ' + u.name + ' actualizada. Pasásela.', 'sign');
+  }).catch(function (e) { toast('No se pudo cambiar: ' + e.message, 'error'); });
+}
+
+function borrarUsuario(userId) {
+  var u = state.users.filter(function (x) { return x.id === userId; })[0];
+  if (!u) return;
+  if (u.id === state.account.id) { toast('No podés borrar tu propio usuario.', 'error'); return; }
+  var admins = state.users.filter(function (x) { return x.role === 'admin' && !x.disabled; });
+  if (u.role === 'admin' && admins.length <= 1) { toast('Tiene que quedar al menos un administrador.', 'error'); return; }
+  if (!confirm('Se borra el usuario «' + u.name + '» y TODOS sus entrenamientos de este dispositivo. ¿Seguir?')) return;
+  CORE.store.deleteUser(u.id).then(function () {
+    state.users = state.users.filter(function (x) { return x.id !== u.id; });
+    render();
+    toast('Usuario ' + u.name + ' borrado.');
+  });
+}
+
+function importarPaqueteAlta(pack) {
+  var user = CORE.validate.validateUser({
+    id: uid(), name: pack.name, role: pack.role, salt: pack.salt, hash: pack.hash,
+    iterations: pack.iterations, createdAt: pack.createdAt, profile: pack.profile,
+  });
+  var existente = usuarioPorNombre(pack.name);
+  if (existente) { user.id = existente.id; }
+  return CORE.store.saveUser(user).then(function () {
+    if (!existente) {
+      state.users.push(user);
+      return CORE.store.saveDocument(CORE.validate.validateDocument(blankData(user.profile || { name: user.name }), user.id));
+    }
+    return null;
+  }).then(function () { return user; });
+}
+
+function descargar(nombre, contenido, tipo) {
+  var blob = new Blob([contenido], { type: tipo || 'application/json' });
+  var a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = nombre;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(function () { URL.revokeObjectURL(a.href); }, 2000);
+}
+
 function exportData() {
   var payload = {
-    app: 'hierro', version: DB.meta.version, exportedAt: new Date().toISOString(),
+    app: 'hierro', version: DB.meta.version, schema: CORE.SCHEMA_VERSION,
+    exportedAt: new Date().toISOString(),
     profile: state.data.profile, prefs: state.data.prefs, sessions: state.data.sessions,
     prs: state.data.prs, bodyweight: state.data.bodyweight,
   };
-  var blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
-  var a = document.createElement('a');
-  a.href = URL.createObjectURL(blob);
-  a.download = 'hierro-' + todayISO() + '.json';
-  document.body.appendChild(a); a.click(); a.remove();
-  setTimeout(function () { URL.revokeObjectURL(a.href); }, 2000);
+  descargar('hierro-' + todayISO() + '.json', JSON.stringify(payload, null, 2), 'application/json');
   toast('Copia exportada.', 'sign');
 }
 
-function importData() {
+function exportCsv() {
+  var csv = CORE.csv.sessionsToCsv(state.data.sessions);
+  if (csv.split('\r\n').length < 2) { toast('Todavía no hay series registradas para exportar.'); return; }
+  descargar('hierro-historial-' + todayISO() + '.csv', '\ufeff' + csv, 'text/csv;charset=utf-8');
+  toast('Historial exportado en CSV.', 'sign');
+}
+
+function exportFullBackup() {
+  CORE.store.fullBackup().then(function (payload) {
+    descargar('hierro-respaldo-completo-' + todayISO() + '.json', JSON.stringify(payload, null, 2), 'application/json');
+    toast('Respaldo completo exportado.', 'sign');
+  }).catch(function (e) { toast('No se pudo armar el respaldo: ' + e.message, 'error'); });
+}
+
+function restoreFullBackup() {
+  elegirArchivo('application/json,.json', function (texto) {
+    var data;
+    try { data = JSON.parse(texto); } catch (e) { toast('El archivo no es un JSON válido.', 'error'); return; }
+    if (!data || !Array.isArray(data.users)) { toast('Ese archivo no es un respaldo completo de HIERRO.', 'error'); return; }
+    if (!confirm('Se van a restaurar ' + data.users.length + ' usuarios y sus historiales. Lo que exista con el mismo id se reemplaza. ¿Seguir?')) return;
+    CORE.store.snapshot('antes de restaurar').catch(function () { return null; }).then(function () {
+      return CORE.store.restoreFullBackup(data);
+    }).then(function (r) {
+      return CORE.store.users();
+    }).then(function (users) {
+      state.users = users;
+      render();
+      toast('Respaldo restaurado.', 'sign');
+    }).catch(function (e) { toast('No se pudo restaurar: ' + e.message, 'error'); });
+  });
+}
+
+function elegirArchivo(accept, onText) {
   var input = document.createElement('input');
   input.type = 'file';
-  input.accept = 'application/json,.json';
+  input.accept = accept;
   input.addEventListener('change', function () {
     var file = input.files && input.files[0];
     if (!file) return;
     var reader = new FileReader();
-    reader.onload = function () {
-      try {
-        var data = JSON.parse(String(reader.result));
-        if (!data || !Array.isArray(data.sessions)) throw new Error('formato');
-        if (!confirm('Se reemplazan las sesiones, récords y peso de este perfil. ¿Seguir?')) return;
+    reader.onload = function () { onText(String(reader.result)); };
+    reader.onerror = function () { toast('No se pudo leer el archivo.', 'error'); };
+    reader.readAsText(file);
+  });
+  input.click();
+}
+
+function importData() {
+  elegirArchivo('application/json,.json,text/csv,.csv', function (texto) {
+    var limpio = texto.replace(/^\ufeff/, '').trim();
+    // ¿CSV o JSON? Se decide por el contenido, no por la extensión.
+    if (limpio.charAt(0) === '{') {
+      var data;
+      try { data = JSON.parse(limpio); } catch (e) { toast('El JSON tiene un error de formato.', 'error'); return; }
+      if (!data || !Array.isArray(data.sessions)) { toast('Ese JSON no es una copia de HIERRO.', 'error'); return; }
+      if (!confirm('Se reemplazan las sesiones, los récords y el peso de tu usuario. ¿Seguir?')) return;
+      CORE.store.snapshot('antes de importar').catch(function () { return null; }).then(function () {
         state.data.sessions = data.sessions;
         state.data.prs = data.prs || {};
         state.data.bodyweight = data.bodyweight || [];
         if (data.prefs) state.data.prefs = Object.assign(state.data.prefs, data.prefs);
         state.data.activeSession = null;
-        saveData(); render();
+        saveData();
+        render();
         toast('Copia importada: ' + data.sessions.length + ' sesiones.', 'sign');
-      } catch (e) {
-        toast('No pudimos leer el archivo. Tiene que ser la copia JSON de HIERRO.', 'error');
-      }
-    };
-    reader.readAsText(file);
+      });
+      return;
+    }
+    // CSV del historial: se suman las sesiones nuevas, sin borrar nada.
+    var sesiones = CORE.csv.csvToSessions(limpio);
+    if (!sesiones.length) { toast('El CSV no tiene filas de series válidas.', 'error'); return; }
+    if (!confirm('Se van a sumar ' + sesiones.length + ' sesiones desde el CSV, sin borrar las que ya tenés. ¿Seguir?')) return;
+    CORE.store.snapshot('antes de importar csv').catch(function () { return null; }).then(function () {
+      state.data.sessions = sesiones.concat(state.data.sessions);
+      saveData();
+      render();
+      toast('Se sumaron ' + sesiones.length + ' sesiones del CSV.', 'sign');
+    });
   });
-  input.click();
 }
 
 /* Instalación como app (PWA). */
@@ -2301,35 +2676,85 @@ $('#btnInstall').addEventListener('click', function () {
 });
 
 /* Al volver a la pestaña, el cronómetro se reajusta (los timers del navegador
-   se frenan en segundo plano y el reloj debe seguir siendo real). */
+   se frenan en segundo plano y el reloj debe seguir siendo real). Al salir, se
+   fuerza el guardado para no perder el último toque. */
 document.addEventListener('visibilitychange', function () {
-  if (!document.hidden && Rest.running) Rest.tick();
-  if (!document.hidden) { updateBand(); Wake.sync(); }
+  if (document.hidden) { flushSave(); return; }
+  if (Rest.running) Rest.tick();
+  updateBand();
+  Wake.sync();
 });
+window.addEventListener('pagehide', flushSave);
 window.addEventListener('hashchange', render);
 
 /* ── Arranque ─────────────────────────────────────────────────────────── */
+function mostrarCargando() {
+  var m = document.getElementById('main');
+  if (m) m.innerHTML = '<div class="view"><p class="gate__note">Abriendo la base de datos…</p></div>';
+}
+
+/* Un enlace de alta trae la cuenta ya creada en otro dispositivo. Se limpia de
+   la barra de direcciones apenas se lee: es una credencial, no un parámetro. */
+function leerEnlaceDeAlta() {
+  var m = /[#&]alta=([A-Za-z0-9+/=_%-]+)/.exec(location.hash || '');
+  if (!m) return;
+  var pack = CORE.packs.unpackAccount(decodeURIComponent(m[1]));
+  if (!pack) { toast('El enlace de alta está incompleto o dañado.', 'error'); return; }
+  state.altaPendiente = pack;
+  try { history.replaceState(null, '', location.pathname + location.search); } catch (e) {}
+}
+
 function boot() {
-  state.users = Store.get(K.users, []);
-  var last = Store.get(K.session, null);
-  if (last && state.users.some(function (u) { return u.id === last; })) {
-    loadAccount(last);
-    if (!location.hash || location.hash === '#/acceso') location.hash = '#/hoy';
-  } else if (!location.hash) {
-    location.hash = '#/acceso';
-  }
-  render();
-  // Si había una sesión activa con descanso en curso, se retoma con la hora real.
-  if (state.data && state.data.activeSession) {
-    var p = firstPending(state.data.activeSession);
-    if (p) updateBand();
-  }
+  mostrarCargando();
+  leerEnlaceDeAlta();
+
+  CORE.store.open().then(function (info) {
+    paso('open:' + info.backend);
+    state.migrated = !!info.migrado;
+    return CORE.store.users();
+  }).then(function (users) {
+    paso('users:' + users.length);
+    state.users = users;
+    return CORE.store.sessionId();
+  }).then(function (id) {
+    paso('session:' + id);
+    var valido = id && state.users.some(function (u) { return u.id === id && !u.disabled; });
+    if (valido) {
+      return loadAccount(id).then(function () {
+        paso('cuenta-cargada');
+        if (!location.hash || location.hash === '#/acceso') location.hash = '#/hoy';
+      });
+    }
+    if (!location.hash) location.hash = '#/acceso';
+    return null;
+  }).then(function () {
+    paso('render');
+    render();
+    if (state.migrated) {
+      toast('Tus datos se migraron al formato nuevo. El respaldo anterior quedó intacto.', 'sign');
+    }
+    // Respaldo automático: uno por día, en silencio.
+    if (state.users.length) unRespaldoPorDia().catch(function () {});
+    if (state.data && state.data.activeSession) {
+      var p = firstPending(state.data.activeSession);
+      if (p) updateBand();
+    }
+    readyResolve(true);
+  }).catch(function (e) {
+    var m = document.getElementById('main');
+    if (m) {
+      m.innerHTML = '<div class="view"><div class="alert alert--error"><b>No se pudo abrir la base de datos.</b><br>' +
+        esc(e && e.message ? e.message : 'error desconocido') + '</div></div>';
+    }
+    readyResolve(false);
+  });
 }
 boot();
 
-// Expuesto para depuración desde la consola del navegador.
+// Expuesto para depuración y para la prueba de humo.
 window.HIERRO = {
-  state: state, Store: Store, render: render, plateMath: plateMath, DB: DB, RT: RT,
+  state: state, render: render, plateMath: plateMath, DB: DB, RT: RT, CORE: CORE,
+  ready: readyPromise, bootTrace: bootTrace,
   // Lógica derivada: se expone para poder verificarla desde la prueba de humo.
   progression: {
     estimate1RM: estimate1RM, repRange: repRange, exerciseHistory: exerciseHistory,
@@ -2337,5 +2762,10 @@ window.HIERRO = {
     muscleStats: muscleStats, policyFor: policyFor,
   },
   wake: Wake,
+  usuarios: {
+    crear: crearUsuario, porNombre: usuarioPorNombre, esAdmin: esAdmin, enlace: enlaceDeAlta,
+    alta: importarPaqueteAlta, borrar: borrarUsuario, restablecer: restablecerPassword,
+  },
+  datos: { exportarCsv: exportCsv, respaldoCompleto: exportFullBackup, snapshot: unRespaldoPorDia },
 };
 })();
