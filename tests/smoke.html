@@ -1,0 +1,235 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Prueba de humo — HIERRO</title>
+<style>
+  body { background:#0B0C0D; color:#F4F5F7; font:14px/1.5 system-ui, sans-serif; margin:0; padding:16px; }
+  h1 { font-size:20px; }
+  #log { white-space:pre-wrap; font-family:ui-monospace, Consolas, monospace; font-size:13px; }
+  .ok { color:#A6E22E; }
+  .bad { color:#FF8B7A; }
+  iframe { position:fixed; right:12px; bottom:12px; width:390px; height:780px; border:1px solid #2C3037; }
+</style>
+</head>
+<body>
+<h1>Prueba de humo</h1>
+<p>Recorre el flujo real de la app dentro de un iframe. Cargá esta página desde un servidor
+(<code>python -m http.server</code>), no con <code>file://</code>.</p>
+<div id="log">Ejecutando…</div>
+<iframe id="app" src="../index.html" title="App bajo prueba"></iframe>
+
+<script>
+var log = document.getElementById('log');
+var results = [];
+function check(name, cond, extra) {
+  results.push({ name: name, ok: !!cond, extra: extra || '' });
+  log.textContent += '\n' + (cond ? 'OK   ' : 'FALLA') + '  ' + name + (cond ? '' : '  → ' + (extra || ''));
+  log.className = cond ? 'ok' : 'bad';
+}
+function sleep(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
+function finish() {
+  var fails = results.filter(function (r) { return !r.ok; });
+  log.textContent += '\n\n' + (fails.length ? 'FALLAS: ' + fails.length + ' de ' + results.length : 'TODO OK (' + results.length + ' comprobaciones)');
+  log.className = fails.length ? 'bad' : 'ok';
+  document.title = fails.length ? 'FALLA ' + fails.length : 'TODO OK';
+}
+
+(async function () {
+  var frame = document.getElementById('app');
+  var w, d;
+  var errors = [];
+
+  await new Promise(function (res) { frame.addEventListener('load', res, { once: true }); });
+  w = frame.contentWindow; d = frame.contentDocument;
+  w.addEventListener('error', function (e) { errors.push(String(e.message)); });
+
+  // Estado limpio
+  w.localStorage.clear();
+  await new Promise(function (res) {
+    frame.addEventListener('load', res, { once: true });
+    frame.contentWindow.location.reload();
+  });
+  await sleep(400);
+  w = frame.contentWindow; d = frame.contentDocument;
+  w.addEventListener('error', function (e) { errors.push(String(e.message)); });
+  w.confirm = function () { return true; };
+  w.alert = function () {};
+
+  check('arranca en la pantalla de acceso', !!d.querySelector('.gate'), 'no se encontró .gate');
+  check('sin perfiles, la pestaña Entrar está deshabilitada', d.querySelector('[data-act="gate-tab"][data-tab="login"]').disabled === true);
+  check('sin perfiles, no hay desplegable vacío de entrada', d.querySelector('#panelLogin').hidden === true);
+  check('no hay errores de JS al arrancar', errors.length === 0, errors.join(' | '));
+
+  // ── Registro ──────────────────────────────────────────────────────────
+  var nameInput = d.querySelector('#regName');
+  check('el formulario de registro existe', !!nameInput);
+  d.querySelector('[data-act="gate-tab"][data-tab="register"]').click();
+  d.querySelector('#regName').value = 'Tester';
+  d.querySelector('#regPass').value = '1234';
+  d.querySelector('#regWeight').value = '82';
+  d.querySelector('[data-act="pick-objetivo"][data-value="fuerza"]').click();
+  d.querySelector('form[data-form="register"]').requestSubmit();
+  await sleep(500);
+
+  var st = w.HIERRO.state;
+  check('se creó el perfil', st.account && st.account.name === 'Tester', 'account=' + JSON.stringify(st.account && st.account.name));
+  check('el objetivo elegido se guardó', st.data.profile.objetivo === 'fuerza', st.data.profile.objetivo);
+  check('el peso inicial se guardó', st.data.profile.weightKg === 82, String(st.data.profile.weightKg));
+
+  // ── Dashboard ─────────────────────────────────────────────────────────
+  check('el dashboard muestra el saludo', /Hola, Tester/.test(d.querySelector('#main').textContent));
+  check('la rutina sugerida respeta el objetivo', /Fuerza A/.test(d.querySelector('#main').textContent));
+  check('la barra de navegación tiene 4 secciones', d.querySelectorAll('.tab').length === 4);
+
+  // ── Inicio de sesión ──────────────────────────────────────────────────
+  d.querySelector('[data-act="start"]').click();
+  await sleep(300);
+  var s = w.HIERRO.state.data.activeSession;
+  check('la sesión arrancó', !!s, 'activeSession nulo');
+  check('la sesión trae los 4 ejercicios de Fuerza A', s && s.entries.length === 4, s && String(s.entries.length));
+  check('las series se generan según la rutina', s && s.entries[0].sets.length === 5, s && String(s.entries[0].sets.length));
+
+  // ── Carga de discos ───────────────────────────────────────────────────
+  var plates = d.querySelector('#plates-0');
+  check('se muestra la carga de discos', plates && /Barra 20 kg/.test(plates.textContent), plates && plates.textContent.slice(0, 60));
+  check('la carga coincide con el peso de la primera serie', plates && /60 kg/.test(plates.textContent));
+
+  // ── Marcar una serie ──────────────────────────────────────────────────
+  var pre = w.HIERRO.state.data.activeSession.entries[0].sets[0].weight;
+  d.querySelector('[data-act="set-toggle"]').click();
+  await sleep(250);
+  s = w.HIERRO.state.data.activeSession;
+  check('la serie quedó completada', s.entries[0].sets[0].done === true);
+  check('la fila de serie muestra el objetivo además del valor real', /6-10|8-10|5/.test(d.querySelector('.setrow').textContent), d.querySelector('.setrow').textContent.trim());
+  check('el volumen de la sesión se calculó', /de volumen/.test(d.querySelector('#main').textContent));
+  check('el descanso arrancó solo', w.HIERRO.state && /descanso|serie/.test(d.querySelector('#nextTitle').textContent));
+  check('la banda de señal está visible', d.querySelector('#nextband').hidden === false);
+  check('el cronómetro muestra un tiempo', /^\d+:\d\d$/.test(d.querySelector('#clockValue').textContent), d.querySelector('#clockValue').textContent);
+
+  // ── Editar peso a mano (sobre la primera serie pendiente) ─────────────
+  var pendIdx = w.HIERRO.state.data.activeSession.entries[0].sets.findIndex(function (x) { return !x.done; });
+  var wInput = d.querySelectorAll('.unit')[0].querySelectorAll('[data-act="w-input"]')[pendIdx];
+  wInput.value = '82,5';
+  wInput.dispatchEvent(new w.Event('change', { bubbles: true }));
+  await sleep(200);
+  s = w.HIERRO.state.data.activeSession;
+  check('el peso editado se guarda en kilos', Math.abs(s.entries[0].sets[pendIdx].weight - 82.5) < 0.01, String(s.entries[0].sets[pendIdx].weight));
+  check('los discos siguen a la serie pendiente', /82,5 kg/.test(d.querySelector('#plates-0').textContent), d.querySelector('#plates-0').textContent.slice(0, 90));
+
+  // ── Récord personal ───────────────────────────────────────────────────
+  check('se registró el récord del ejercicio', !!w.HIERRO.state.data.prs['squat'], JSON.stringify(w.HIERRO.state.data.prs));
+
+  // ── Agregar y quitar serie ────────────────────────────────────────────
+  var before = w.HIERRO.state.data.activeSession.entries[0].sets.length;
+  d.querySelector('[data-act="add-set"][data-entry="0"]').click();
+  await sleep(200);
+  check('se puede agregar una serie', w.HIERRO.state.data.activeSession.entries[0].sets.length === before + 1);
+  d.querySelector('[data-act="del-set"][data-entry="0"]').click();
+  await sleep(200);
+  check('se puede quitar una serie', w.HIERRO.state.data.activeSession.entries[0].sets.length === before);
+
+  // ── Hoja de técnica ───────────────────────────────────────────────────
+  d.querySelector('[data-act="sheet"][data-entry="0"]').click();
+  await sleep(250);
+  check('la hoja de técnica se abre', d.querySelector('#sheet').hidden === false);
+  check('la hoja muestra claves de ejecución', d.querySelectorAll('#sheetCues li').length >= 3, String(d.querySelectorAll('#sheetCues li').length));
+  check('la hoja muestra la carga de barra', /Barra 20 kg/.test(d.querySelector('#sheetPlates').textContent));
+  check('la hoja trae la figura o el diagrama', !!d.querySelector('#sheetFigure img, #sheetFigure svg'));
+  d.querySelector('[data-close-sheet]').click();
+  await sleep(150);
+  check('la hoja de técnica se cierra', d.querySelector('#sheet').hidden === true);
+
+  // ── Terminar sesión ───────────────────────────────────────────────────
+  d.querySelector('[data-act="finish"]').click();
+  await sleep(350);
+  check('la sesión se guardó en el historial', w.HIERRO.state.data.sessions.length === 1, String(w.HIERRO.state.data.sessions.length));
+  check('la sesión activa se limpió', w.HIERRO.state.data.activeSession === null);
+  check('la vista cambió a Progreso', w.HIERRO.state.view === 'historial', w.HIERRO.state.view);
+  check('el gráfico de volumen se dibuja', !!d.querySelector('#main svg.chart'));
+  check('aparece la tabla de récords', /Récords personales/.test(d.querySelector('#main').textContent));
+
+  // ── Selector de rutinas ───────────────────────────────────────────────
+  w.location.hash = '#/entrenar';
+  await sleep(350);
+  d = frame.contentDocument;
+  var soloObjetivo = d.querySelectorAll('.routine').length;
+  check('sin sesión activa se ve el selector de rutinas', soloObjetivo > 0, String(soloObjetivo));
+  d.querySelector('[data-act="filter"][data-value=""]').click();
+  await sleep(300);
+  d = frame.contentDocument;
+  check('el filtro "Todas" muestra las 8 rutinas', d.querySelectorAll('.routine').length === 8, String(d.querySelectorAll('.routine').length));
+  check('el chip "Todas" queda seleccionado', d.querySelector('[data-act="filter"][data-value=""]').getAttribute('aria-pressed') === 'true');
+
+  // ── Persistencia ──────────────────────────────────────────────────────
+  await new Promise(function (res) {
+    frame.addEventListener('load', res, { once: true });
+    frame.contentWindow.location.reload();
+  });
+  await sleep(500);
+  w = frame.contentWindow;
+  check('la sesión del usuario persiste tras recargar', !!w.HIERRO.state.account, 'sin cuenta activa');
+  check('el historial persiste tras recargar', w.HIERRO.state.data.sessions.length === 1, String(w.HIERRO.state.data.sessions.length));
+
+  // ── Cambio de unidad ──────────────────────────────────────────────────
+  w.location.hash = '#/perfil';
+  await sleep(300);
+  d = frame.contentDocument;
+  var unitSel = d.querySelector('#pfUnit');
+  unitSel.value = 'lb';
+  unitSel.dispatchEvent(new w.Event('change', { bubbles: true }));
+  await sleep(300);
+  check('la unidad cambia a libras', w.HIERRO.state.data.prefs.unit === 'lb');
+  d = frame.contentDocument;
+  check('el peso se convierte a libras en pantalla', /^180,7/.test(d.querySelector('#pfWeight').value), d.querySelector('#pfWeight').value);
+  check('la etiqueta del peso usa la unidad activa', /Peso actual \(lb\)/.test(d.querySelector('#main').textContent));
+  check('el peso se sigue guardando en kilos', Math.round(w.HIERRO.state.data.profile.weightKg) === 82, String(w.HIERRO.state.data.profile.weightKg));
+
+  // ── Cambio de contraseña ──────────────────────────────────────────────
+  var userid = w.HIERRO.state.users[0].id;
+  d.querySelector('[data-act="pass-toggle"]').click();
+  await sleep(200);
+  d = frame.contentDocument;
+  d.querySelector('#newPass').value = 'nueva1234';
+  d.querySelector('#newPass2').value = 'nueva1234';
+  d.querySelector('form[data-form="password"]').requestSubmit();
+  await sleep(450);
+  d = frame.contentDocument;
+  check('el cambio de contraseña cierra el formulario', d.querySelector('#passForm').hidden === true);
+
+  d.querySelector('[data-act="logout"]').click();
+  await sleep(400);
+  d = frame.contentDocument;
+  check('cerrar sesión vuelve a la pantalla de acceso', !!d.querySelector('.gate'));
+
+  d.querySelector('#loginUser').value = w.HIERRO.state.users[0].name;
+  d.querySelector('#loginPass').value = '1234';
+  d.querySelector('form[data-form="login"]').requestSubmit();
+  await sleep(450);
+  check('la contraseña vieja ya no entra', w.HIERRO.state.account === null, 'entró con la vieja');
+
+  d = frame.contentDocument;
+  d.querySelector('#loginUser').value = 'NombreQueNoExiste';
+  d.querySelector('#loginPass').value = 'nueva1234';
+  d.querySelector('form[data-form="login"]').requestSubmit();
+  await sleep(400);
+  check('un nombre inexistente no entra', w.HIERRO.state.account === null);
+  check('el aviso de nombre inexistente se muestra', /no hay ningún perfil/i.test(d.querySelector('#loginError').textContent), d.querySelector('#loginError').textContent);
+
+  d.querySelector('#loginUser').value = w.HIERRO.state.users[0].name;
+  d.querySelector('#loginPass').value = 'nueva1234';
+  d.querySelector('form[data-form="login"]').requestSubmit();
+  await sleep(500);
+  check('entra escribiendo el nombre y la contraseña nueva', w.HIERRO.state.account !== null, 'no entró con la nueva');
+
+  check('sin errores de JS durante todo el recorrido', errors.length === 0, errors.join(' | '));
+  finish();
+})().catch(function (e) {
+  log.textContent += '\nEXCEPCIÓN: ' + (e && e.stack || e);
+  log.className = 'bad';
+  document.title = 'EXCEPCION';
+});
+</script>
+</body>
+</html>

@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="HIERRO">
+  <rect width="512" height="512" rx="96" fill="#0B0C0D"/>
+  <!-- Barra -->
+  <rect x="96" y="238" width="320" height="36" fill="#FFC72C"/>
+  <!-- Discos externos -->
+  <rect x="60" y="176" width="40" height="160" rx="6" fill="#F4F5F7"/>
+  <rect x="412" y="176" width="40" height="160" rx="6" fill="#F4F5F7"/>
+  <!-- Discos internos -->
+  <rect x="112" y="196" width="34" height="120" rx="5" fill="#C8102E"/>
+  <rect x="366" y="196" width="34" height="120" rx="5" fill="#C8102E"/>
+</svg>

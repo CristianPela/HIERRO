@@ -1,0 +1,167 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>HIERRO — diario de entrenamiento</title>
+
+<meta name="description" content="Registrá tus entrenamientos, calculá la carga de la barra y seguí tu progreso. Funciona sin conexión y se instala en el celular.">
+<meta name="format-detection" content="telephone=no">
+<meta name="theme-color" content="#0B0C0D">
+<meta name="color-scheme" content="dark">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="HIERRO">
+<link rel="manifest" href="manifest.json">
+<link rel="icon" href="icons/icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" sizes="180x180" href="icons/apple-touch-icon.png">
+
+<!-- Tipografías (CDN). Fira Sans Condensed lleva los números monumentales y las bandas
+     de señal; Fira Sans el texto de interfaz. Misma superfamilia, dos cortes. -->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fira+Sans+Condensed:wght@500;600;700;800&family=Fira+Sans:wght@400;500;600;700&display=swap">
+
+<!-- Iconografía (CDN, según brief) -->
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css" crossorigin="anonymous" referrerpolicy="no-referrer">
+
+<!-- Tailwind CSS (CDN, según brief). Se usa para layout; la identidad visual vive en styles.css -->
+<script src="https://cdn.tailwindcss.com"></script>
+<script>
+  // Paleta y tipografías expuestas a Tailwind para el layout utilitario.
+  tailwind.config = {
+    darkMode: 'class',
+    theme: {
+      extend: {
+        fontFamily: {
+          sans: ['"Fira Sans"', 'system-ui', 'sans-serif'],
+          cond: ['"Fira Sans Condensed"', 'system-ui', 'sans-serif'],
+        },
+        colors: {
+          asphalt: '#0B0C0D',
+          panel: '#16181B',
+          panel2: '#1D2024',
+          line: '#2C3037',
+          chalk: '#F4F5F7',
+          dim: '#A6ACB4',
+          sign: '#FFC72C',
+        },
+      },
+    },
+  };
+</script>
+
+<link rel="stylesheet" href="styles.css">
+</head>
+
+<body class="font-sans bg-asphalt text-chalk">
+
+<!-- Salto de contenido para teclado -->
+<a class="skip-link" href="#main">Saltar al contenido</a>
+
+<!-- ══ CABECERA ══════════════════════════════════════════════════════════════
+     Franja negra con el logotipo. Debajo viaja la banda de señal "SIGUIENTE",
+     que es la cadena de decisiones del entrenamiento.                          -->
+<header class="topbar">
+  <button class="brand" data-go="#/hoy" aria-label="Ir al inicio">
+    <span class="brand__mark" aria-hidden="true">
+      <svg viewBox="0 0 32 32" width="26" height="26">
+        <rect x="1" y="12.5" width="30" height="7" fill="#FFC72C"/>
+        <rect x="1" y="6" width="4.5" height="20" fill="#F4F5F7"/>
+        <rect x="26.5" y="6" width="4.5" height="20" fill="#F4F5F7"/>
+      </svg>
+    </span>
+    <span class="brand__word">HIERRO</span>
+  </button>
+
+  <div class="topbar__side">
+    <span class="goal-tag" id="goalTag" hidden></span>
+    <button class="icon-btn" id="btnSound" type="button" title="Aviso sonoro al terminar el descanso" aria-pressed="false">
+      <i class="fa-solid fa-volume-high" aria-hidden="true"></i><span class="sr-only">Aviso sonoro</span>
+    </button>
+    <button class="icon-btn" id="btnInstall" type="button" hidden title="Instalar la app">
+      <i class="fa-solid fa-mobile-screen-button" aria-hidden="true"></i><span class="sr-only">Instalar la app</span>
+    </button>
+    <button class="icon-btn" id="btnLogout" type="button" title="Cerrar sesión">
+      <i class="fa-solid fa-right-from-bracket" aria-hidden="true"></i><span class="sr-only">Cerrar sesión</span>
+    </button>
+  </div>
+</header>
+
+<!-- ══ NAVEGACIÓN ESCRITORIO (riel lateral) ════════════════════════════════ -->
+<nav class="rail" id="rail" aria-label="Secciones"></nav>
+
+<!-- ══ CONTENIDO ═══════════════════════════════════════════════════════════ -->
+<main id="main" tabindex="-1"></main>
+
+<!-- ══ NAVEGACIÓN MÓVIL ════════════════════════════════════════════════════ -->
+<nav class="tabbar" id="tabbar" aria-label="Secciones"></nav>
+
+<!-- ══ BANDA DE SEÑAL: siguiente decisión + descanso ══════════════════════ -->
+<div class="nextband" id="nextband" hidden>
+  <div class="nextband__progress" id="restProgress" hidden><span></span></div>
+  <div class="nextband__row">
+    <div class="nextband__icon" id="nextIcon" aria-hidden="true"><i class="fa-solid fa-arrow-right"></i></div>
+    <div class="nextband__text">
+      <p class="nextband__title" id="nextTitle">Sin sesión activa</p>
+      <p class="nextband__sub" id="nextSub">Elegí una rutina para empezar</p>
+    </div>
+    <div class="nextband__clock" id="nextClock" hidden>
+      <span class="mono" id="clockValue">1:30</span>
+      <span class="nextband__clock-label">descanso</span>
+    </div>
+    <button class="icon-btn icon-btn--band" id="btnRestAdd" type="button" title="Sumar 15 segundos" hidden><i class="fa-solid fa-plus"></i><span class="sr-only">Sumar 15 segundos de descanso</span></button>
+    <button class="icon-btn icon-btn--band" id="btnRestSkip" type="button" title="Saltar descanso" hidden><i class="fa-solid fa-forward"></i><span class="sr-only">Saltar descanso</span></button>
+  </div>
+</div>
+
+<!-- ══ HOJA DE TÉCNICA (microfigura + claves de ejecución) ════════════════ -->
+<div class="sheet" id="sheet" hidden>
+  <div class="sheet__scrim" data-close-sheet></div>
+  <section class="sheet__panel" role="dialog" aria-modal="true" aria-labelledby="sheetTitle">
+    <header class="sheet__head">
+      <div>
+        <p class="sheet__muscle" id="sheetMuscle">Pecho</p>
+        <h2 class="sheet__title" id="sheetTitle">Press de banca</h2>
+      </div>
+      <button class="icon-btn" type="button" data-close-sheet aria-label="Cerrar">
+        <i class="fa-solid fa-xmark" aria-hidden="true"></i>
+      </button>
+    </header>
+
+    <div class="figure" id="sheetFigure">
+      <!-- Microfigura: dos frames del repositorio cruzados en fundido, o pictograma local -->
+    </div>
+
+    <div class="sheet__body">
+      <p class="figure__credit" id="sheetCredit"></p>
+      <h3 class="sheet__label">Cómo se ejecuta</h3>
+      <ul class="cues" id="sheetCues"></ul>
+      <h3 class="sheet__label">Carga de la barra</h3>
+      <div class="plateload" id="sheetPlates"></div>
+    </div>
+
+    <footer class="sheet__foot">
+      <button class="btn btn--sign" type="button" data-close-sheet>A entrenar</button>
+    </footer>
+  </section>
+</div>
+
+<!-- ══ AVISOS ══════════════════════════════════════════════════════════════ -->
+<div class="toasts" id="toasts" role="status" aria-live="polite"></div>
+
+<!-- Base de datos de ejercicios y rutinas: editar estos archivos para personalizar -->
+<script src="data/exercises.js"></script>
+<script src="data/routines.js"></script>
+<script src="app.js"></script>
+<script>
+  // Registro del service worker (solo con http/https: GitHub Pages lo sirve así).
+  if ('serviceWorker' in navigator && location.protocol.startsWith('http')) {
+    window.addEventListener('load', function () {
+      navigator.serviceWorker.register('sw.js').catch(function () { /* sin caché offline: la app sigue andando */ });
+    });
+  }
+</script>
+</body>
+</html>
