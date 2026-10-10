@@ -337,8 +337,34 @@ main { display: block; }
   font-size: var(--t-lg); font-weight: 800;
 }
 .routine__body { display: block; padding: 11px 14px; }
+.routine__hint {
+  display: block; font-size: var(--t-micro); letter-spacing: .04em;
+  text-transform: uppercase; color: var(--chalk-faint); margin-bottom: 7px;
+}
+.routine__line {
+  display: grid; grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: baseline; gap: 10px;
+  padding: 5px 0; border-bottom: 1px solid var(--line);
+}
+.routine__line:last-of-type { border-bottom: 0; }
+.routine__ex { font-size: var(--t-sm); color: var(--chalk-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.routine__sets { font-size: var(--t-micro); color: var(--chalk-faint); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.routine__load {
+  font-family: 'Fira Sans Condensed', system-ui, sans-serif;
+  font-size: var(--t-md); font-weight: 700;
+  font-variant-numeric: tabular-nums; white-space: nowrap;
+}
 .routine__exercises { display: block; font-size: var(--t-sm); color: var(--chalk-dim); }
-.routine__note { display: block; font-size: var(--t-micro); color: var(--chalk-faint); margin-top: 5px; }
+.routine__note { display: block; font-size: var(--t-micro); color: var(--chalk-faint); margin-top: 7px; }
+
+/* Barra de fecha: elegir qué día se entrena o se registra. */
+.datebar {
+  display: grid; gap: 10px;
+  padding: 12px; margin-bottom: 14px;
+  background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius);
+}
+.datebar .field { gap: 5px; }
+.datebar .gate__note { margin: 0; }
 
 /* Tira de los últimos 7 días en el panel de inicio. */
 .weekstrip { display: flex; gap: 6px; }
@@ -400,10 +426,21 @@ main { display: block; }
 }
 .unit__summary { font-size: var(--t-sm); color: var(--chalk-faint); }
 .unit__foot {
-  display: flex; justify-content: flex-end; gap: 8px;
+  display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px;
   padding: 9px 12px; border-top: 1px solid var(--line);
 }
+.unit__foot-set { display: flex; gap: 8px; }
 .unit .plateload { margin: 0 12px 12px; }
+
+/* Por qué este peso: la progresión explica su decisión dentro de la tarjeta. */
+.unit__presc {
+  display: flex; align-items: flex-start; gap: 8px;
+  padding: 9px 12px; margin: 0;
+  border-top: 1px solid var(--line);
+  background: var(--panel-2);
+  font-size: var(--t-sm); color: var(--chalk-dim);
+}
+.unit__presc i { color: var(--sign); margin-top: 3px; flex: none; }
 
 /* ── Fila de serie ────────────────────────────────────────────────────── */
 
@@ -702,6 +739,22 @@ main { display: block; }
 .pr__name { font-weight: 600; }
 .pr__meta { font-size: var(--t-micro); color: var(--chalk-faint); }
 .pr__load { font-family: 'Fira Sans Condensed', sans-serif; font-size: var(--t-md); font-weight: 700; }
+
+/* Músculos: volumen de la semana y estado de recuperación. */
+.muscle { padding: 11px 0; border-bottom: 1px solid var(--line); }
+.muscle:last-of-type { border-bottom: 0; }
+.muscle__top { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin-bottom: 7px; }
+.muscle__name { font-weight: 600; }
+.muscle__vol {
+  font-family: 'Fira Sans Condensed', system-ui, sans-serif;
+  font-size: var(--t-md); font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+.muscle__vol small { font-family: 'Fira Sans', sans-serif; font-size: var(--t-micro); font-weight: 500; color: var(--chalk-faint); }
+.muscle__foot {
+  display: flex; align-items: center; gap: 8px;
+  margin-top: 7px; font-size: var(--t-micro); color: var(--chalk-faint);
+}
 
 .rows { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; }
 .row-link { display: flex; align-items: center; gap: 12px; width: 100%; padding: 13px 14px; text-align: left; border-bottom: 1px solid var(--line); }

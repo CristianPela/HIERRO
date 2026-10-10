@@ -50,6 +50,12 @@ function todayISO(d) {
   d = d || new Date();
   return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
 }
+/* Fecha de hace n días, en ISO local. */
+function isoDaysAgo(n) {
+  var d = new Date();
+  d.setDate(d.getDate() - n);
+  return todayISO(d);
+}
 function fmtDayLong(iso) {
   var p = String(iso).split('-');
   var d = new Date(+p[0], +p[1] - 1, +p[2]);
@@ -58,6 +64,13 @@ function fmtDayLong(iso) {
 function fmtDayShort(iso) {
   var p = String(iso).split('-');
   return (+p[2]) + '/' + (+p[1]);
+}
+/* "Hace cuánto" en lenguaje humano, para la recuperación por músculo. */
+function haceCuanto(horas) {
+  if (horas < 1) return 'recién';
+  if (horas < 24) return 'hace ' + Math.round(horas) + ' h';
+  var d = Math.round(horas / 24);
+  return 'hace ' + d + (d === 1 ? ' día' : ' días');
 }
 function fmtClock(sec) {
   sec = Math.max(0, Math.round(sec));
@@ -124,16 +137,28 @@ var state = {
   data: null,      // datos del usuario activo
   view: 'hoy',
   filter: null,    // filtro de objetivo en la pantalla de entrenar
+  strengthEx: null, // ejercicio elegido en la curva de fuerza estimada
+  newSessionDate: todayISO(),  // día que se está por entrenar
+  calcWeight: 60,              // peso de la calculadora de discos
+  picker: { q: '', muscle: '' }, // estado del selector de ejercicios
   pendingObjetivo: null,  // elección provisional mientras se crea un perfil
   pendingNivel: null,
   _sheetEntry: null,      // ejercicio cuya hoja de técnica está abierta
   _stamp: null,           // serie recién marcada, para animar el check tras el render
 };
 
+function defaultPrefs() {
+  return {
+    sound: true, vibrate: true, barKg: 20, defaultRest: 90, unit: 'kg',
+    wake: true,   // mantener la pantalla encendida mientras hay sesión
+    prog: true,   // progresión automática de cargas
+  };
+}
+
 function blankData(profile) {
   return {
     profile: profile,
-    prefs: { sound: true, vibrate: true, barKg: 20, defaultRest: 90, unit: 'kg' },
+    prefs: defaultPrefs(),
     sessions: [],
     prs: {},
     bodyweight: [],
@@ -152,6 +177,8 @@ function loadAccount(id) {
   state.account = acc;
   state.data = Store.get(K.user(id), null) || blankData(acc.profile);
   if (!state.data.profile) state.data.profile = acc.profile;
+  // Las preferencias nuevas se suman a los perfiles que ya existían.
+  state.data.prefs = Object.assign(defaultPrefs(), state.data.prefs || {});
   Store.set(K.user(id), state.data);
   Store.set(K.session, id);
   return true;
@@ -207,34 +234,92 @@ function firstPending(s) {
   return null;
 }
 
-function startSession(routineKey) {
+function startSession(routineKey, fechaISO) {
   var r = routineOf(routineKey);
   if (!r) return;
   // Nunca se descarta una sesión en curso sin preguntar.
   if (state.data.activeSession &&
       !confirm('Tenés una sesión sin terminar. ¿Empezar «' + r.name + '» y descartar la anterior?')) return;
+  // El día se elige: sirve para registrar un entrenamiento de ayer u otro día.
+  var fecha = fechaISO && /^\d{4}-\d{2}-\d{2}$/.test(fechaISO) ? fechaISO : todayISO();
+  if (fecha > todayISO()) fecha = todayISO();   // nada de fechas futuras
   var session = {
     id: uid(), routineKey: r.key, routineName: r.name,
-    objetivo: r.objetivo[0], date: todayISO(), startedAt: Date.now(), finishedAt: null,
-    entries: r.items.map(function (it) {
-      var ex = exOf(it.ex);
-      // La rutina manda; los valores del ejercicio son el respaldo documentado.
-      var objetivoReps = it.reps || ex.defaultReps || '10';
-      var cantidad = it.sets || ex.defaultSets || 3;
-      var reps = firstNumber(objetivoReps) || 10;
-      return {
-        ex: it.ex, name: ex.name, muscle: ex.muscle, img: ex.id || '', pattern: ex.pattern, load: ex.load,
-        unit: repUnitOf(objetivoReps),
-        rest: it.rest || ex.defaultRest || 90,
-        sets: Array.from({ length: cantidad }, function () {
-          return { target: objetivoReps, reps: reps, weight: Number(it.w) || 0, done: false, ts: null, pr: false };
-        }),
-      };
-    }),
+    objetivo: r.objetivo[0], date: fecha, startedAt: Date.now(), finishedAt: null,
+    entries: r.items.map(function (it) { return newEntry(it.ex, r.objetivo[0], it); }),
   };
   state.data.activeSession = session;
   state.data.lastRoutine = r.key;
   saveData();
+}
+
+/* Peso de arranque cuando no hay historial: el que la rutina usa para ese
+   ejercicio. Evita inventar un número y evita arrancar en cero. */
+function routineDefaultWeight(exKey) {
+  var w = 0;
+  RT.routines.forEach(function (r) {
+    r.items.forEach(function (it) {
+      if (it.ex === exKey && Number(it.w) > w) w = Number(it.w);
+    });
+  });
+  return w;
+}
+
+/* Arma la entrada de un ejercicio para la sesión en curso, con el peso que
+   sugiere la progresión. Sirve tanto al empezar una rutina como al sumar un
+   ejercicio suelto ("hoy hago tres ejercicios y listo"). */
+function newEntry(exKey, objetivo, item) {
+  var ex = exOf(exKey);
+  var cfg = item || {};
+  var repsTexto = cfg.reps || ex.defaultReps || '10';
+  var cantidad = cfg.sets || ex.defaultSets || 3;
+  var base = cfg.w != null ? Number(cfg.w) : routineDefaultWeight(exKey);
+  var presc = prescriptionFor(exKey, { w: base, reps: repsTexto, prog: cfg.prog }, objetivo);
+  return {
+    ex: exKey, name: ex.name, muscle: ex.muscle, img: ex.id || '', pattern: ex.pattern, load: ex.load,
+    unit: repUnitOf(repsTexto),
+    rest: cfg.rest || ex.defaultRest || 90,
+    presc: { kind: presc.kind, why: presc.why, policy: presc.policy },
+    sets: Array.from({ length: cantidad }, function () {
+      return {
+        target: repsTexto,
+        reps: presc.reps || firstNumber(repsTexto) || 10,
+        weight: presc.weight > 0 ? presc.weight : base,
+        done: false, ts: null, pr: false,
+      };
+    }),
+  };
+}
+
+function addExerciseToSession(exKey) {
+  var s = state.data.activeSession;
+  if (!s) return;
+  s.entries.push(newEntry(exKey, s.objetivo));
+  saveData();
+  toast(exOf(exKey).name + ' agregado.', 'sign');
+  render();
+}
+
+function removeExerciseFromSession(entryIdx) {
+  var s = state.data.activeSession;
+  if (!s) return;
+  if (s.entries.length <= 1) { toast('Una sesión necesita al menos un ejercicio.'); return; }
+  var e = s.entries[entryIdx];
+  var hechas = e.sets.filter(function (x) { return x.done; }).length;
+  if (hechas && !confirm('«' + e.name + '» ya tiene ' + hechas + ' serie(s) marcada(s). ¿Quitarlo igual?')) return;
+  s.entries.splice(entryIdx, 1);
+  saveData(); render();
+  toast(e.name + ' fuera de la sesión.');
+}
+
+/* Igualar todas las series a la primera: el atajo de calculadora más pedido. */
+function applyFirstSetToAll(entryIdx) {
+  var e = state.data.activeSession.entries[entryIdx];
+  var base = e.sets[0];
+  if (!base) return;
+  e.sets.forEach(function (st) { st.reps = base.reps; st.weight = base.weight; });
+  saveData(); render();
+  toast('Todas las series quedaron en ' + fmtWeight(base.weight) + ' × ' + base.reps + '.');
 }
 
 function finishSession() {
@@ -441,6 +526,11 @@ function plateLoadHtml(exKey, weightKg) {
     return '<p class="plateload__hint">' + esc(ex.equipment || 'Sin barra') +
       ': no lleva discos. Registrá el peso total del implemento o el peso corporal.</p>';
   }
+  return platesBlockHtml(weightKg);
+}
+
+/* El panel de discos, calculado a partir de un peso total en kilos. */
+function platesBlockHtml(weightKg) {
   if (unit() === 'lb') {
     return '<p class="plateload__hint">Estás trabajando en libras. La calculadora de discos usa kilos y barra olímpica: cambiá la unidad a kg en Perfil para verla.</p>';
   }
@@ -565,6 +655,256 @@ function pictoSvg(pattern) {
   var fn = PICTO[pattern] || PICTO.core;
   return '<svg viewBox="0 0 120 116" role="img" aria-label="Diagrama del movimiento">' + fn() + '</svg>';
 }
+
+/* ═══ 6b. PROGRESIÓN, 1RM Y MÚSCULOS ══════════════════════════════════════
+   Las ideas de este bloque están inspiradas en openGym (AGPL-3.0) y
+   reimplementadas desde cero para esta app: no se copió código suyo.
+   Las tres reglas que hacen que esto sea confiable:
+     · Todo se DERIVA del historial. No hay contadores guardados que se
+       desincronicen: si corregís una serie, la próxima sugerencia cambia.
+     · Una serie sin marcar es un fallo. Una sesión que se desarmó nunca sube
+       el peso.
+     · El 1RM sólo se estima hasta 12 repeticiones. Más arriba las fórmulas
+       discrepan decenas de kilos: no decir nada es mejor que inventar.
+   ──────────────────────────────────────────────────────────────────────── */
+
+var REP_CAP = 12;      // arriba de esto no se estima 1RM
+var FALLOS_PARA_BAJAR = 3;
+
+/* 1RM estimado (Epley). Devuelve null cuando no puede responder con honestidad. */
+function estimate1RM(kg, reps) {
+  var w = Number(kg), r = Number(reps);
+  if (!isFinite(w) || !isFinite(r) || w <= 0 || r < 1) return null;
+  if (r === 1) return Math.round(w * 10) / 10;   // una repetición es medición, no estimación
+  if (r > REP_CAP) return null;
+  return Math.round(w * (1 + r / 30) * 10) / 10;
+}
+
+/* Rango de repeticiones de un objetivo textual: '8-10' → {min:8,max:10}; '5' → {5,5}. */
+function repRange(target) {
+  var nums = String(target == null ? '' : target).match(/\d+(?:[.,]\d+)?/g) || [];
+  var vals = nums.map(function (n) { return parseFloat(n.replace(',', '.')); });
+  if (!vals.length) return { min: 0, max: 0 };
+  return { min: Math.min.apply(null, vals), max: Math.max.apply(null, vals) };
+}
+
+/* Paso de carga en kilos (2,5 kg o 5 lb), y el peso siguiente en la grilla. */
+function loadStepKg() { return unit() === 'lb' ? 5 / LB_PER_KG : 2.5; }
+function addLoadStep(kg) { var st = loadStepKg(); return Math.round((kg + st) / st) * st; }
+function deloadLoad(kg) { var st = loadStepKg(); return Math.max(st, Math.round((kg * 0.9) / st) * st); }
+
+/* Historial de un ejercicio, del más viejo al más nuevo: qué pasó en cada sesión.
+   Se ordena por la FECHA del entrenamiento, no por cuándo lo registraste: si
+   cargás el de ayer después del de hoy, la progresión tiene que leer el de ayer
+   como anterior. En fechas iguales manda el orden de carga. */
+function exerciseHistory(exKey) {
+  var out = [];
+  state.data.sessions.slice().reverse().forEach(function (s) {
+    var e = null;
+    for (var i = 0; i < s.entries.length; i++) if (s.entries[i].ex === exKey) { e = s.entries[i]; break; }
+    if (!e) return;
+    var hechas = e.sets.filter(function (x) { return x.done; });
+    if (!hechas.length) return;
+    var range = repRange(e.sets[0].target);
+    var reps = hechas.map(function (x) { return Number(x.reps) || 0; });
+    var pesos = hechas.map(function (x) { return Number(x.weight) || 0; });
+    out.push({
+      date: s.date,
+      weight: Math.max.apply(null, pesos),
+      reps: reps,
+      low: Math.min.apply(null, reps),
+      goal: range.max,
+      planned: e.sets.length,
+      completo: hechas.length >= e.sets.length,
+      ok: hechas.length >= e.sets.length && reps.every(function (r) { return range.min > 0 && r >= range.min; }),
+      tope: range.max > 0 && reps.every(function (r) { return r >= range.max; }),
+    });
+  });
+  out.sort(function (a, b) { return a.date < b.date ? -1 : (a.date > b.date ? 1 : 0); });
+  return out;
+}
+
+/* Sesiones seguidas sin completar, contando desde la última. Un cambio de peso
+   corta la racha: los fallos con otro peso no cuentan para bajar este. */
+function fallosSeguidos(hist) {
+  var n = 0;
+  for (var i = hist.length - 1; i >= 0; i--) {
+    if (hist[i].ok) break;
+    if (i < hist.length - 1 && hist[i].weight !== hist[i + 1].weight) break;
+    n++;
+  }
+  return n;
+}
+
+/* Qué política le toca a un ejercicio: la de la rutina si la trae, y si no la del
+   objetivo. Fuerza sube peso al completar; hipertrofia y el resto trepan reps primero. */
+function policyFor(item, objetivo) {
+  if (item && item.prog) return item.prog;
+  if (!state.data.prefs.prog) return 'off';
+  return objetivo === 'fuerza' ? 'linear' : 'double';
+}
+
+/* Qué peso y qué reps te tocan hoy, y por qué. Devuelve siempre un motivo legible. */
+function prescriptionFor(exKey, item, objetivo) {
+  var base = Number(item && item.w) || 0;
+  var policy = policyFor(item, objetivo);
+  var hist = exerciseHistory(exKey);
+  var range = repRange(item && item.reps);
+  var step = loadStepKg();
+
+  if (policy === 'off') {
+    return { policy: 'off', kind: 'off', weight: base, step: step,
+      why: 'Progresión desactivada: queda el peso de la rutina.' };
+  }
+  if (!hist.length) {
+    return { policy: policy, kind: 'first', weight: base, step: step,
+      why: 'Primera vez con este ejercicio: arrancás con ' + fmtWeight(base) + '.' };
+  }
+
+  var last = hist[hist.length - 1];
+  var w = last.weight > 0 ? last.weight : base;
+
+  // Sin carga externa (flexiones, plancha): se progresa en repeticiones, no en kilos.
+  if (w <= 0) {
+    var meta = range.max || last.goal || 10;
+    if (last.ok && last.tope) {
+      return { policy: policy, kind: 'up', weight: 0, reps: meta + 1, step: 0,
+        why: 'Completaste ' + meta + ' repeticiones en todas las series: hoy andá por ' + (meta + 1) + '.' };
+    }
+    return { policy: policy, kind: 'hold', weight: 0, reps: meta, step: 0,
+      why: 'Sin carga: repetí ' + meta + ' repeticiones por serie hasta completarlas todas.' };
+  }
+
+  if (policy === 'linear') {
+    if (last.ok) {
+      return { policy: policy, kind: 'up', weight: addLoadStep(w), reps: range.min || last.goal, step: step,
+        why: 'Completaste ' + (range.max || last.goal) + ' repeticiones en todas las series con ' + fmtWeight(w) +
+             ': hoy sube ' + fmtWeight(step) + '.' };
+    }
+    var fallos = fallosSeguidos(hist);
+    if (fallos >= FALLOS_PARA_BAJAR) {
+      var abajo = deloadLoad(w);
+      return { policy: policy, kind: 'deload', weight: abajo, reps: range.min || last.goal, step: step,
+        why: fallos + ' sesiones sin completar: bajá a ' + fmtWeight(abajo) + ' y volvé a subir de a ' + fmtWeight(step) + '.' };
+    }
+    return { policy: policy, kind: 'hold', weight: w, reps: range.min || last.goal, step: step,
+      why: 'No completaste todas las series con ' + fmtWeight(w) + ' (te faltan ' + (FALLOS_PARA_BAJAR - fallos) + ' para bajar): hoy repetís ese peso.' };
+  }
+
+  // Doble progresión: primero trepás repeticiones, y recién con el tope del rango sube el peso.
+  if (last.tope) {
+    return { policy: policy, kind: 'up', weight: addLoadStep(w), reps: range.min || last.goal, step: step,
+      why: 'Llegaste a ' + range.max + ' repeticiones en todas las series: hoy sube ' + fmtWeight(step) +
+           ' y volvés a ' + (range.min || last.goal) + '.' };
+  }
+  var aim = Math.min(range.max || last.goal || 10, Math.max(range.min || 1, last.low + 1));
+  return { policy: policy, kind: 'hold', weight: w, reps: aim, step: step,
+    why: 'Mismo peso (' + fmtWeight(w) + '): hoy apuntá a ' + aim + ' repeticiones por serie.' };
+}
+
+/* Mejor 1RM estimado de un ejercicio, con la serie que lo produjo. */
+function best1RMOf(exKey) {
+  var best = null;
+  state.data.sessions.forEach(function (s) {
+    s.entries.forEach(function (e) {
+      if (e.ex !== exKey) return;
+      e.sets.forEach(function (st) {
+        if (!st.done) return;
+        var est = estimate1RM(st.weight, st.reps);
+        if (est != null && (!best || est > best.est)) {
+          best = { est: est, weight: Number(st.weight) || 0, reps: Number(st.reps) || 0, date: s.date };
+        }
+      });
+    });
+  });
+  return best;
+}
+
+/* Serie temporal del 1RM estimado, una por sesión con datos. */
+function strengthSeries(exKey) {
+  var pts = [];
+  state.data.sessions.slice().reverse().forEach(function (s) {
+    var best = null;
+    s.entries.forEach(function (e) {
+      if (e.ex !== exKey) return;
+      e.sets.forEach(function (st) {
+        if (!st.done) return;
+        var est = estimate1RM(st.weight, st.reps);
+        if (est != null && (!best || est > best)) best = est;
+      });
+    });
+    if (best != null) pts.push({ date: s.date, value: best });
+  });
+  pts.sort(function (a, b) { return a.date < b.date ? -1 : (a.date > b.date ? 1 : 0); });
+  return pts;
+}
+
+/* Ejercicios con suficiente historial como para mostrar una curva. */
+function strengthExercises() {
+  var seen = {};
+  state.data.sessions.forEach(function (s) {
+    s.entries.forEach(function (e) {
+      var any = e.sets.some(function (x) { return x.done && Number(x.weight) > 0 && Number(x.reps) >= 1; });
+      if (any) seen[e.ex] = { key: e.ex, name: e.name, n: (seen[e.ex] ? seen[e.ex].n : 0) + 1 };
+    });
+  });
+  return Object.keys(seen).map(function (k) { return seen[k]; }).sort(function (a, b) { return b.n - a.n; });
+}
+
+/* Volumen y recuperación por grupo muscular. La recuperación es una estimación
+   simple y explicable: entre 24 y 60 horas, según cuán dura fue la última sesión
+   de ese músculo comparada con la más dura que registraste. */
+function muscleStats(days) {
+  var since = Date.now() - (days || 7) * 86400000;
+  var map = {};
+  state.data.sessions.forEach(function (s) {
+    var t = new Date(s.date + 'T12:00:00').getTime();
+    s.entries.forEach(function (e) {
+      var m = e.muscle || 'Otros';
+      var vol = 0, hizo = false;
+      e.sets.forEach(function (x) {
+        if (!x.done) return;
+        hizo = true;
+        vol += (Number(x.weight) || 0) * (Number(x.reps) || 0);
+      });
+      if (!hizo) return;
+      var r = map[m] || (map[m] = { muscle: m, volume: 0, last: 0, lastVolume: 0, maxVolume: 0, veces: 0 });
+      r.veces++;
+      if (t >= since) r.volume += vol;
+      if (t > r.last) { r.last = t; r.lastVolume = vol; }
+      if (vol > r.maxVolume) r.maxVolume = vol;
+    });
+  });
+  var now = Date.now();
+  return Object.keys(map).map(function (m) {
+    var r = map[m];
+    r.hours = (now - r.last) / 3600000;
+    var intensidad = r.maxVolume > 0 ? Math.min(1, r.lastVolume / r.maxVolume) : 0.5;
+    r.needed = 24 + 36 * intensidad;
+    r.state = r.hours >= r.needed ? 'listo' : 'recuperando';
+    return r;
+  }).sort(function (a, b) { return b.volume - a.volume; });
+}
+
+/* ── Pantalla encendida durante el entrenamiento ─────────────────────────
+   El navegador suelta el bloqueo al ocultarse la pestaña, así que se vuelve a
+   pedir al volver. Si no hay soporte o se rechaza, no pasa nada. */
+var Wake = {
+  lock: null,
+  sync: function () {
+    var quiere = !!(state.data && state.data.activeSession && state.data.prefs.wake &&
+      navigator.wakeLock && navigator.wakeLock.request);
+    if (quiere && !this.lock) {
+      navigator.wakeLock.request('screen').then(function (l) {
+        Wake.lock = l;
+        l.addEventListener('release', function () { Wake.lock = null; });
+      }).catch(function () { /* sin soporte, sin foco o rechazado: no es crítico */ });
+    } else if (!quiere && this.lock) {
+      try { this.lock.release(); } catch (e) { /* ya liberado */ }
+      this.lock = null;
+    }
+  },
+};
 
 /* ═══ 7. CRONÓMETRO DE DESCANSO ═══════════════════════════════════════════ */
 
@@ -856,7 +1196,18 @@ function streak() {
 }
 
 function routineCard(r, highlight) {
-  var first = r.items.slice(0, 3).map(function (it) { return exOf(it.ex).name; }).join(' · ');
+  /* Cada ejercicio con su carga sugerida: se ve antes de empezar de dónde sale
+     cada número, que es lo que hace confiable a la progresión. */
+  var lineas = r.items.map(function (it) {
+    var ex = exOf(it.ex);
+    var presc = prescriptionFor(it.ex, it, r.objetivo[0]);
+    var carga = presc.weight > 0 ? fmtWeight(presc.weight) : 'corporal';
+    return '<span class="routine__line">' +
+      '<span class="routine__ex">' + esc(ex.name) + '</span>' +
+      '<span class="routine__sets">' + it.sets + ' × ' + esc(it.reps) + '</span>' +
+      '<span class="routine__load">' + esc(carga) + '</span>' +
+    '</span>';
+  }).join('');
   return '<button class="routine" data-act="start" data-routine="' + r.key + '">' +
     '<span class="routine__head' + (highlight ? ' routine__head--sign' : '') + '">' +
       '<span style="min-width:0"><span class="routine__name">' + esc(r.name) + '</span>' +
@@ -864,7 +1215,8 @@ function routineCard(r, highlight) {
       '<span class="routine__count">' + r.items.length + '</span>' +
     '</span>' +
     '<span class="routine__body">' +
-      '<span class="routine__exercises">' + esc(first) + '…</span>' +
+      '<span class="routine__hint">' + (state.data.prefs.prog ? 'Carga sugerida por tu historial' : 'Carga de la rutina') + '</span>' +
+      lineas +
       '<span class="routine__note">' + esc(r.note) + '</span>' +
     '</span>' +
   '</button>';
@@ -878,13 +1230,24 @@ function viewTrain() {
   var st = sessionStats(s);
   var html = '<div class="view__head"><div>' +
     '<h1 class="view__title">' + esc(s.routineName) + '</h1>' +
-    '<p class="view__sub">' + st.doneSets + ' de ' + st.totalSets + ' series · ' + fmtNum(toDisplay(st.volume)) + ' ' + unit() + ' de volumen</p>' +
+    '<p class="view__sub">' + st.exercises + ' ejercicios · ' + st.doneSets + ' de ' + st.totalSets + ' series · ' +
+      fmtNum(toDisplay(st.volume)) + ' ' + unit() + ' de volumen</p>' +
     '</div></div>' +
-    '<div class="progress" style="margin-bottom:16px"><span style="transform:scaleX(' + (st.percent / 100) + ')"></span></div>';
+    '<div class="progress" style="margin-bottom:14px"><span style="transform:scaleX(' + (st.percent / 100) + ')"></span></div>' +
+
+    /* El día se puede corregir: si entrenaste ayer y lo registrás hoy, la fecha manda. */
+    '<div class="datebar">' +
+      '<div class="field">' +
+        '<label class="field__label" for="sessDate">Día de este entrenamiento</label>' +
+        '<input class="input" type="date" id="sessDate" data-act="sess-date" value="' + esc(s.date) + '" max="' + todayISO() + '">' +
+      '</div>' +
+      '<p class="gate__note">' + (s.date === todayISO() ? 'Es de hoy.' : 'Lo estás registrando como ' + esc(fmtDayLong(s.date)) + '.') + '</p>' +
+    '</div>';
 
   s.entries.forEach(function (e, i) { html += unitCard(e, i); });
 
   html += '<div style="display:grid;gap:9px;margin-top:16px">' +
+    '<button class="btn btn--block" data-act="open-picker"><i class="fa-solid fa-plus"></i> Agregar otro ejercicio</button>' +
     '<button class="btn btn--sign btn--block" data-act="finish"><i class="fa-solid fa-flag-checkered"></i> Terminar y guardar</button>' +
     '<button class="btn btn--ghost btn--block" data-act="discard">Descartar sesión</button>' +
   '</div>';
@@ -904,6 +1267,20 @@ function routinePicker() {
       '<h1 class="view__title">Elegí tu rutina</h1>' +
       '<p class="view__sub">' + esc((RT.objetivos[obj] && RT.objetivos[obj].desc) || 'Todas las rutinas disponibles, ordenadas por objetivo y nivel.') + '</p>' +
     '</div></div>' +
+
+    /* El día se elige: podés registrar el entrenamiento de ayer sin inventar nada. */
+    '<div class="datebar">' +
+      '<div class="field">' +
+        '<label class="field__label" for="sessionDate">Día del entrenamiento</label>' +
+        '<input class="input" type="date" id="sessionDate" data-act="session-date" value="' + esc(state.newSessionDate) + '" max="' + todayISO() + '">' +
+      '</div>' +
+      '<div class="filters" style="margin:0">' +
+        '<button class="chip" data-act="set-date" data-value="' + todayISO() + '" aria-pressed="' + (state.newSessionDate === todayISO()) + '">Hoy</button>' +
+        '<button class="chip" data-act="set-date" data-value="' + isoDaysAgo(1) + '" aria-pressed="' + (state.newSessionDate === isoDaysAgo(1)) + '">Ayer</button>' +
+        '<button class="chip" data-act="set-date" data-value="' + isoDaysAgo(2) + '" aria-pressed="' + (state.newSessionDate === isoDaysAgo(2)) + '">Anteayer</button>' +
+      '</div>' +
+    '</div>' +
+
     '<div class="filters">' + chips + '</div>' + list;
 }
 
@@ -916,6 +1293,13 @@ function unitCard(e, i) {
   var picto = hasFigure
     ? '<img src="' + esc(imgUrl(e.img, 0)) + '" alt="" loading="lazy" data-figure-frame data-ex="' + i + '">'
     : pictoSvg(e.pattern);
+  // Contadores en vivo: series hechas y volumen del ejercicio, como en una planilla.
+  var hechas = 0, vol = 0;
+  e.sets.forEach(function (x) {
+    if (!x.done) return;
+    hechas++;
+    vol += (Number(x.weight) || 0) * (Number(x.reps) || 0);
+  });
 
   return '<section class="unit' + (current ? ' is-active' : '') + (done ? ' is-done' : '') + '">' +
     '<div class="unit__head">' +
@@ -924,14 +1308,24 @@ function unitCard(e, i) {
         '<h2 class="unit__name">' + esc(e.name) + '</h2>' +
         '<div class="unit__meta">' +
           '<span class="unit__muscle">' + esc(e.muscle) + '</span>' +
-          '<span class="unit__summary">' + e.sets.length + ' × ' + esc(e.sets[0].target) + ' · ' + e.rest + ' s descanso</span>' +
+          '<span class="unit__summary">' + hechas + '/' + e.sets.length + ' series · ' + esc(e.sets[0].target) +
+            ' · ' + e.rest + ' s' + (vol > 0 ? ' · ' + fmtNum(toDisplay(vol)) + ' ' + unit() : '') + '</span>' +
         '</div>' +
       '</div>' +
     '</div>' +
+    (e.presc && e.presc.why ? '<p class="unit__presc"><i class="fa-solid fa-arrow-trend-up" aria-hidden="true"></i> ' + esc(e.presc.why) + '</p>' : '') +
     '<div class="sets">' + rows + '</div>' +
     '<div class="unit__foot">' +
-      '<button class="btn btn--sm" data-act="add-set" data-entry="' + i + '"><i class="fa-solid fa-plus"></i> Agregar serie</button>' +
-      '<button class="btn btn--sm btn--ghost" data-act="del-set" data-entry="' + i + '"' + (e.sets.length < 2 ? ' disabled' : '') + '><i class="fa-solid fa-minus"></i> Quitar</button>' +
+      '<button class="btn btn--sm btn--ghost" data-act="del-exercise" data-entry="' + i + '">' +
+        '<i class="fa-solid fa-trash" aria-hidden="true"></i> Quitar ejercicio</button>' +
+      '<span class="unit__foot-set">' +
+        '<button class="btn btn--sm btn--ghost" data-act="equalize" data-entry="' + i + '" title="Copiar la primera serie a todas">' +
+          '<i class="fa-solid fa-equals" aria-hidden="true"></i> Igualar</button>' +
+        '<button class="btn btn--sm" data-act="add-set" data-entry="' + i + '">' +
+          '<i class="fa-solid fa-plus" aria-hidden="true"></i> Serie</button>' +
+        '<button class="btn btn--sm btn--ghost" data-act="del-set" data-entry="' + i + '"' + (e.sets.length < 2 ? ' disabled' : '') + ' aria-label="Quitar la última serie">' +
+          '<i class="fa-solid fa-minus" aria-hidden="true"></i></button>' +
+      '</span>' +
     '</div>' +
     (e.load === 'barbell' ? '<div class="plateload" id="plates-' + i + '">' + plateLoadHtml(e.ex, activeWeight(e)) + '</div>' : '') +
   '</section>';
@@ -1024,10 +1418,64 @@ function viewHistory() {
       }).join('') + '</div></div>';
   }
 
+  /* ── Músculos: volumen de la semana y en qué anda la recuperación ────── */
+  var muscles = muscleStats(7);
+  var muscleBlock = '';
+  if (muscles.length) {
+    var maxVol = Math.max.apply(null, muscles.map(function (m) { return m.volume; }).concat([1]));
+    muscleBlock = '<div class="section"><div class="section__head"><h2 class="section__title">Músculos</h2>' +
+      '<span class="section__note">volumen de los últimos 7 días</span></div>' +
+      muscles.map(function (m) {
+        var resto = m.state === 'recuperando' ? Math.max(0, Math.round(m.needed - m.hours)) : 0;
+        return '<div class="muscle">' +
+          '<div class="muscle__top">' +
+            '<span class="muscle__name">' + esc(m.muscle) + '</span>' +
+            '<span class="muscle__vol">' + (m.volume > 0 ? fmtNum(toDisplay(m.volume)) + ' <small>' + unit() + '</small>' : '—') + '</span>' +
+          '</div>' +
+          '<div class="progress"><span style="transform:scaleX(' + (m.volume / maxVol) + ')"></span></div>' +
+          '<div class="muscle__foot">' +
+            '<span class="tag ' + (m.state === 'listo' ? 'tag--live' : 'tag--off') + '">' + m.state + '</span>' +
+            '<span>' + haceCuanto(m.hours) + (resto ? ' · faltan ~' + resto + ' h' : ' · ya podés volver') + '</span>' +
+          '</div>' +
+        '</div>';
+      }).join('') +
+      '<p class="gate__note" style="margin-top:10px">La recuperación es una estimación: 24 a 60 horas según cuán dura fue la última sesión de ese músculo comparada con la más dura que registraste.</p>' +
+    '</div>';
+  }
+
+  /* ── Fuerza: 1RM estimado y su evolución por ejercicio ───────────────── */
+  var strength = strengthExercises();
+  var strengthBlock = '';
+  if (strength.length) {
+    var elegido = state.strengthEx && strength.some(function (x) { return x.key === state.strengthEx; })
+      ? state.strengthEx : strength[0].key;
+    var serie = strengthSeries(elegido);
+    var mejor = best1RMOf(elegido);
+    strengthBlock = '<div class="section"><div class="section__head"><h2 class="section__title">Fuerza estimada</h2>' +
+      '<span class="section__note">1RM estimado</span></div>' +
+      '<div class="field" style="margin-bottom:10px">' +
+        '<label class="field__label" for="strengthEx">Ejercicio</label>' +
+        '<select class="select" id="strengthEx" data-act="strength-ex">' +
+          strength.map(function (x) {
+            return '<option value="' + esc(x.key) + '"' + (x.key === elegido ? ' selected' : '') + '>' + esc(x.name) + '</option>';
+          }).join('') +
+        '</select>' +
+      '</div>' +
+      (serie.length >= 2 ? lineChart(serie.map(function (p) { return toDisplay(p.value); }), []) : '') +
+      (mejor ? '<div class="board" style="margin-top:10px">' +
+        row('Mejor estimado', fmtNum(toDisplay(mejor.est), 1) + ' <small>' + unit() + '</small>') +
+        row('Salió de', fmtWeight(mejor.weight) + ' × ' + mejor.reps + ' <small>' + esc(fmtDayShort(mejor.date)) + '</small>') +
+      '</div>' : '') +
+      (serie.length < 2 ? '<p class="gate__note">Hacen falta dos sesiones o más con peso y repeticiones para dibujar la evolución.</p>' : '') +
+      '<p class="gate__note" style="margin-top:8px">Es una estimación, no una medición: se calcula con series de hasta ' +
+        REP_CAP + ' repeticiones. Más arriba no se estima, porque las fórmulas dejan de coincidir.</p>' +
+    '</div>';
+  }
+
   var list = '<div class="section"><div class="section__head"><h2 class="section__title">Sesiones</h2></div>' +
     d.sessions.map(function (s, i) { return sessionRow(s, i); }).join('') + '</div>';
 
-  return head + board + chart + bwBlock + prBlock + list;
+  return head + board + chart + muscleBlock + strengthBlock + bwBlock + prBlock + list;
 }
 
 function sessionRow(s, i) {
@@ -1130,7 +1578,11 @@ function viewProfile() {
       '<div class="filters" style="margin:0">' +
         '<button class="chip" data-act="toggle-sound" aria-pressed="' + prefs.sound + '">Aviso sonoro</button>' +
         '<button class="chip" data-act="toggle-vibrate" aria-pressed="' + prefs.vibrate + '">Vibración</button>' +
+        '<button class="chip" data-act="toggle-wake" aria-pressed="' + prefs.wake + '">Pantalla encendida</button>' +
+        '<button class="chip" data-act="toggle-prog" aria-pressed="' + prefs.prog + '">Progresión automática</button>' +
       '</div>' +
+      '<p class="field__hint">La progresión automática deriva el peso de cada ejercicio de tu historial: ' +
+        'con el objetivo de fuerza sube cuando completás todas las series, y en el resto primero trepa repeticiones.</p>' +
     '</div></div>' +
 
     '<div class="section"><div class="section__head"><h2 class="section__title">Instalar en el celular</h2>' +
@@ -1138,6 +1590,13 @@ function viewProfile() {
       (enModoApp()
         ? '<div class="alert alert--sign"><b>Listo:</b> estás usando HIERRO como aplicación instalada. Los datos viven en este dispositivo.</div>'
         : '<div class="alert">' + textoInstalar() + '</div>') +
+    '</div>' +
+
+    '<div class="section"><div class="section__head"><h2 class="section__title">Calculadora de discos</h2>' +
+      '<span class="section__note">qué cargar en cada lado</span></div>' +
+      '<div class="field"><label class="field__label" for="calcWeight">Peso total (' + unit() + ')</label>' +
+        '<input class="input" id="calcWeight" data-act="calc-weight" inputmode="decimal" value="' + fmtInputWeight(state.calcWeight) + '"></div>' +
+      '<div class="plateload" id="calcPlates" style="margin-top:12px">' + platesBlockHtml(state.calcWeight) + '</div>' +
     '</div>' +
 
     '<div class="section"><div class="section__head"><h2 class="section__title">Datos</h2><span class="section__note">todo queda en este navegador</span></div>' +
@@ -1245,6 +1704,7 @@ function render() {
   bindFigures();
   updateBand();
   updateInstallButton();
+  Wake.sync();
 
   // Foco: primero la serie recién marcada (si hay), después el control que lo tenía,
   // y si cambió la vista, el contenedor principal para que el lector lo anuncie.
@@ -1347,8 +1807,11 @@ function updateInstallButton() {
 document.addEventListener('click', function (ev) {
   var el = ev.target && ev.target.closest ? ev.target.closest('[data-act]') : null;
   if (!el) {
-    var scrim = ev.target.closest ? ev.target.closest('[data-close-sheet]') : null;
-    if (scrim) closeSheet();
+    var cerrar = ev.target.closest ? ev.target.closest('[data-close-sheet],[data-close-picker]') : null;
+    if (cerrar) {
+      if (cerrar.hasAttribute('data-close-picker')) closePicker();
+      else closeSheet();
+    }
     return;
   }
   var act = el.getAttribute('data-act');
@@ -1386,11 +1849,25 @@ document.addEventListener('click', function (ev) {
       break;
 
     case 'start':
-      startSession(el.getAttribute('data-routine'));
+      startSession(el.getAttribute('data-routine'), state.newSessionDate);
       go('#/entrenar');
       render();
       toast('Sesión iniciada. ¡A cargar la barra!', 'sign');
       break;
+
+    case 'set-date':
+      state.newSessionDate = el.getAttribute('data-value') || todayISO();
+      render();
+      break;
+
+    case 'open-picker': openPicker(); break;
+    case 'pick-exercise': pickExercise(el.getAttribute('data-ex')); break;
+    case 'pick-muscle':
+      state.picker.muscle = el.getAttribute('data-value') || '';
+      renderPicker();
+      break;
+    case 'del-exercise': removeExerciseFromSession(entryIdx); break;
+    case 'equalize': applyFirstSetToAll(entryIdx); break;
 
     case 'finish': finishSession(); break;
     case 'discard': discardSession(); break;
@@ -1475,6 +1952,18 @@ document.addEventListener('click', function (ev) {
       saveData(); render();
       break;
 
+    case 'toggle-wake':
+      state.data.prefs.wake = !state.data.prefs.wake;
+      saveData(); render();
+      toast(state.data.prefs.wake ? 'La pantalla va a quedar encendida mientras entrenás.' : 'Pantalla encendida desactivada.');
+      break;
+
+    case 'toggle-prog':
+      state.data.prefs.prog = !state.data.prefs.prog;
+      saveData(); render();
+      toast(state.data.prefs.prog ? 'Progresión automática activada.' : 'Progresión automática desactivada: los pesos quedan como los pusiste.');
+      break;
+
     case 'export': exportData(); break;
     case 'import': importData(); break;
 
@@ -1500,6 +1989,25 @@ document.addEventListener('click', function (ev) {
 document.addEventListener('change', function (ev) {
   var el = ev.target;
   var act = el.getAttribute && el.getAttribute('data-act');
+  if (act === 'strength-ex') {
+    state.strengthEx = el.value;
+    render();
+    return;
+  }
+  if (act === 'session-date') {
+    state.newSessionDate = el.value || todayISO();
+    render();
+    return;
+  }
+  if (act === 'sess-date') {
+    var s = state.data.activeSession;
+    if (s && /^\d{4}-\d{2}-\d{2}$/.test(el.value)) {
+      s.date = el.value > todayISO() ? todayISO() : el.value;
+      saveData(); render();
+      toast('Entrenamiento registrado como ' + fmtDayLong(s.date) + '.');
+    }
+    return;
+  }
   if (act === 'rep-input' || act === 'w-input') {
     var e = state.data.activeSession.entries[+el.getAttribute('data-entry')];
     var st = e.sets[+el.getAttribute('data-set')];
@@ -1528,6 +2036,20 @@ document.addEventListener('change', function (ev) {
 document.addEventListener('input', function (ev) {
   var el = ev.target;
   var act = el.getAttribute && el.getAttribute('data-act');
+  // Buscador del selector de ejercicios: se redibuja solo la lista, sin tocar el foco.
+  if (el.id === 'pickerBuscar') {
+    state.picker.q = el.value || '';
+    renderPicker();
+    return;
+  }
+  // Calculadora de discos: se recalcula en vivo mientras escribís.
+  if (act === 'calc-weight') {
+    var vCalc = parseFloat(String(el.value).replace(',', '.'));
+    state.calcWeight = isNaN(vCalc) ? 0 : toKg(vCalc);
+    var caja = $('#calcPlates');
+    if (caja) caja.innerHTML = platesBlockHtml(state.calcWeight);
+    return;
+  }
   if (act !== 'w-input') return;
   var entryIdx = +el.getAttribute('data-entry');
   var e = state.data.activeSession.entries[entryIdx];
@@ -1549,6 +2071,69 @@ function changeSet(entryIdx, setIdx, delta) {
 
 /* Re-render completo conservando la posición del scroll (simple y suficiente). */
 function refreshLive() { render(); }
+
+/* ── Selector de ejercicios: sumar a la sesión en curso ─────────────────
+   La rutina es un punto de partida, no un contrato: acá agregás los que
+   quieras, con la carga sugerida para cada uno. */
+function openPicker() {
+  var p = $('#picker');
+  if (!p || !state.data.activeSession) return;
+  state.picker = { q: '', muscle: '' };
+  $('#pickerBuscar').value = '';
+  $('#pickerMeta').textContent = 'Sumando al entrenamiento del ' + fmtDayLong(state.data.activeSession.date);
+  renderPicker();
+  p.hidden = false;
+  $('#pickerBuscar').focus();
+}
+
+function closePicker() {
+  var p = $('#picker');
+  if (!p || p.hidden) return;
+  p.hidden = true;
+  var disparador = document.querySelector('#main [data-act="open-picker"]');
+  if (disparador) disparador.focus({ preventScroll: true });
+}
+
+function renderPicker() {
+  var s = state.data.activeSession;
+  var lista = $('#pickerLista'), chips = $('#pickerMusculos');
+  if (!lista || !s) return;
+
+  var musculos = [];
+  DB.exercises.forEach(function (ex) { if (musculos.indexOf(ex.muscle) === -1) musculos.push(ex.muscle); });
+  chips.innerHTML = '<button class="chip" data-act="pick-muscle" data-value="" aria-pressed="' + (!state.picker.muscle) + '">Todos</button>' +
+    musculos.map(function (m) {
+      return '<button class="chip" data-act="pick-muscle" data-value="' + esc(m) + '" aria-pressed="' + (state.picker.muscle === m) + '">' + esc(m) + '</button>';
+    }).join('');
+
+  var q = state.picker.q.toLowerCase();
+  var yaEsta = {};
+  s.entries.forEach(function (e) { yaEsta[e.ex] = true; });
+
+  var filtrados = DB.exercises.filter(function (ex) {
+    if (state.picker.muscle && ex.muscle !== state.picker.muscle) return false;
+    if (!q) return true;
+    return ex.name.toLowerCase().indexOf(q) !== -1 || (ex.nameEn || '').toLowerCase().indexOf(q) !== -1;
+  });
+
+  lista.innerHTML = filtrados.length ? filtrados.map(function (ex) {
+    var presc = prescriptionFor(ex.key, { w: routineDefaultWeight(ex.key) }, s.objetivo);
+    var carga = presc.weight > 0 ? fmtWeight(presc.weight)
+      : (ex.load === 'body' ? 'peso corporal' : 'sin historial');
+    return '<button class="row-link" data-act="pick-exercise" data-ex="' + esc(ex.key) + '">' +
+      '<span class="row-link__icon"><i class="fa-solid ' + (yaEsta[ex.key] ? 'fa-check' : 'fa-plus') + '"></i></span>' +
+      '<span class="row-link__text">' +
+        '<span class="row-link__name">' + esc(ex.name) + '</span>' +
+        '<span class="row-link__desc">' + esc(ex.muscle) + ' · ' + esc(ex.equipment || '') + ' · ' + esc(carga) + '</span>' +
+      '</span>' +
+    '</button>';
+  }).join('') : '<p class="gate__note">Ningún ejercicio coincide con «' + esc(state.picker.q) + '». Probá con otra palabra.</p>';
+}
+
+function pickExercise(exKey) {
+  addExerciseToSession(exKey);
+  closePicker();
+}
 
 function openSheet(entryIdx) {
   var e = state.data.activeSession.entries[entryIdx];
@@ -1623,9 +2208,11 @@ document.addEventListener('click', function (ev) {
   btn.innerHTML = '<i class="fa-solid ' + (paused ? 'fa-play' : 'fa-pause') + '"></i> ' + (paused ? 'seguir' : 'pausar');
 });
 
-/* Escape cierra la hoja de técnica. */
+/* Escape cierra la hoja de técnica y el selector de ejercicios. */
 document.addEventListener('keydown', function (ev) {
-  if (ev.key === 'Escape') closeSheet();
+  if (ev.key !== 'Escape') return;
+  closeSheet();
+  closePicker();
 });
 
 /* Envío de formularios del acceso. */
@@ -1717,7 +2304,7 @@ $('#btnInstall').addEventListener('click', function () {
    se frenan en segundo plano y el reloj debe seguir siendo real). */
 document.addEventListener('visibilitychange', function () {
   if (!document.hidden && Rest.running) Rest.tick();
-  if (!document.hidden) updateBand();
+  if (!document.hidden) { updateBand(); Wake.sync(); }
 });
 window.addEventListener('hashchange', render);
 
@@ -1741,5 +2328,14 @@ function boot() {
 boot();
 
 // Expuesto para depuración desde la consola del navegador.
-window.HIERRO = { state: state, Store: Store, render: render, plateMath: plateMath, DB: DB, RT: RT };
+window.HIERRO = {
+  state: state, Store: Store, render: render, plateMath: plateMath, DB: DB, RT: RT,
+  // Lógica derivada: se expone para poder verificarla desde la prueba de humo.
+  progression: {
+    estimate1RM: estimate1RM, repRange: repRange, exerciseHistory: exerciseHistory,
+    prescriptionFor: prescriptionFor, best1RMOf: best1RMOf, strengthSeries: strengthSeries,
+    muscleStats: muscleStats, policyFor: policyFor,
+  },
+  wake: Wake,
+};
 })();

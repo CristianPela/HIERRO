@@ -13,6 +13,17 @@ GitHub Pages.
 
 ---
 
+## 0. Qué hace
+
+- **Cuentas locales**: varios perfiles en el mismo dispositivo, cada uno con su contraseña. Los datos no salen del navegador.
+- **Rutinas por objetivo** (hipertrofia, fuerza, definición, resistencia) y **elegís cuántos ejercicios hacés**: la rutina es el punto de partida, no un contrato. Podés sumar cualquier ejercicio del catálogo (72) con buscador y filtro por músculo, y quitar los que no vayas a hacer.
+- **Fecha elegible**: antes de empezar elegís el día (hoy, ayer, anteayer o la fecha exacta) y después lo podés corregir en el tracker. Sirve para registrar un entrenamiento de otro día sin mentirle a las estadísticas.
+- **Progresión automática**: el peso de cada ejercicio se **deriva de tu historial**, no de un número fijo. Con objetivo de fuerza sube cuando completás todas las series; en el resto primero trepa repeticiones dentro del rango (doble progresión); y después de tres sesiones sin completar, baja un 10 % para volver a subir. Cada tarjeta dice **por qué** ese peso. Se puede apagar desde Perfil.
+- **Calculadora de discos**: qué cargar en cada lado, con el color oficial de cada disco. Panel por ejercicio y calculadora suelta en Perfil. El botón **Igualar** copia la primera serie a todas.
+- **1RM estimado** por ejercicio (Epley) con su curva en el tiempo y la serie de la que salió. Se estima solo hasta 12 repeticiones: más arriba las fórmulas dejan de coincidir y la app prefiere no inventar.
+- **Músculos**: volumen de los últimos 7 días por grupo muscular y el estado de recuperación (24 a 60 h según cuán dura fue la última sesión de ese músculo).
+- **Cronómetro de descanso** con aviso sonoro y vibración, **pantalla encendida** mientras entrenás (wake lock), historial, récords, exportar e importar copias y **funcionamiento sin conexión**.
+
 ## 1. Probar en tu máquina
 
 ```bash

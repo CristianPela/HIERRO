@@ -148,6 +148,30 @@
   </section>
 </div>
 
+<!-- ══ SELECTOR DE EJERCICIOS (agregar a la sesión en curso) ═══════════════ -->
+<div class="sheet" id="picker" hidden>
+  <div class="sheet__scrim" data-close-picker></div>
+  <section class="sheet__panel" role="dialog" aria-modal="true" aria-labelledby="pickerTitle">
+    <header class="sheet__head">
+      <div>
+        <p class="sheet__muscle" id="pickerMeta">Sumar al entrenamiento de hoy</p>
+        <h2 class="sheet__title" id="pickerTitle">Elegí un ejercicio</h2>
+      </div>
+      <button class="icon-btn" type="button" data-close-picker aria-label="Cerrar">
+        <i class="fa-solid fa-xmark" aria-hidden="true"></i>
+      </button>
+    </header>
+    <div class="sheet__body">
+      <div class="field">
+        <label class="field__label" for="pickerBuscar">Buscar</label>
+        <input class="input" id="pickerBuscar" type="search" placeholder="Press, sentadilla, curl…" autocomplete="off">
+      </div>
+      <div class="filters" id="pickerMusculos" style="margin-top:12px"></div>
+      <div class="rows" id="pickerLista" style="margin-top:4px"></div>
+    </div>
+  </section>
+</div>
+
 <!-- ══ AVISOS ══════════════════════════════════════════════════════════════ -->
 <div class="toasts" id="toasts" role="status" aria-live="polite"></div>
 

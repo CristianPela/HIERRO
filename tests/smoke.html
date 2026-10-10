@@ -164,6 +164,104 @@ function finish() {
   check('el filtro "Todas" muestra las 8 rutinas', d.querySelectorAll('.routine').length === 8, String(d.querySelectorAll('.routine').length));
   check('el chip "Todas" queda seleccionado', d.querySelector('[data-act="filter"][data-value=""]').getAttribute('aria-pressed') === 'true');
 
+  // ── Fecha elegible, cantidad de ejercicios, cargas y calculadora ──────
+  function isoLocal(x) {
+    return x.getFullYear() + '-' + String(x.getMonth() + 1).padStart(2, '0') + '-' + String(x.getDate()).padStart(2, '0');
+  }
+  var ayerLocal = (function () { var x = new Date(); x.setDate(x.getDate() - 1); return isoLocal(x); })();
+
+  check('el selector de rutinas deja elegir el día', !!d.querySelector('#sessionDate'));
+  check('la tarjeta de rutina muestra la carga sugerida de cada ejercicio', !!d.querySelector('.routine__load'), (d.querySelector('.routine__load') || {}).textContent);
+  d.querySelector('[data-act="set-date"][data-value="' + ayerLocal + '"]').click();
+  await sleep(260);
+  d = frame.contentDocument;
+  check('el chip "Ayer" queda seleccionado', d.querySelector('[data-act="set-date"][data-value="' + ayerLocal + '"]').getAttribute('aria-pressed') === 'true');
+
+  d.querySelector('[data-act="start"]').click();
+  await sleep(350);
+  d = frame.contentDocument;
+  var ses2 = w.HIERRO.state.data.activeSession;
+  check('la sesión arranca con el día elegido', ses2 && ses2.date === ayerLocal, ses2 && ses2.date);
+  check('el tracker deja corregir el día', !!d.querySelector('#sessDate'));
+
+  var n0 = ses2.entries.length;
+  d.querySelector('[data-act="open-picker"]').click();
+  await sleep(300);
+  d = frame.contentDocument;
+  check('el selector de ejercicios se abre', d.querySelector('#picker').hidden === false);
+  d.querySelector('#pickerBuscar').value = 'curl';
+  d.querySelector('#pickerBuscar').dispatchEvent(new w.Event('input', { bubbles: true }));
+  await sleep(260);
+  d = frame.contentDocument;
+  var coincidencias = d.querySelectorAll('#pickerLista [data-act="pick-exercise"]').length;
+  check('el buscador filtra la lista', coincidencias > 0 && coincidencias < 72, String(coincidencias));
+  d.querySelector('#pickerLista [data-act="pick-exercise"]').click();
+  await sleep(320);
+  d = frame.contentDocument;
+  check('el ejercicio elegido se suma a la sesión', w.HIERRO.state.data.activeSession.entries.length === n0 + 1,
+    String(w.HIERRO.state.data.activeSession.entries.length));
+
+  var n1 = w.HIERRO.state.data.activeSession.entries.length;
+  d.querySelectorAll('[data-act="del-exercise"]')[n1 - 1].click();
+  await sleep(320);
+  check('se puede quitar un ejercicio de la sesión', w.HIERRO.state.data.activeSession.entries.length === n1 - 1,
+    String(w.HIERRO.state.data.activeSession.entries.length));
+
+  d = frame.contentDocument;
+  var s0 = w.HIERRO.state.data.activeSession.entries[0].sets[0];
+  s0.weight = 55; s0.reps = 7;
+  d.querySelector('[data-act="equalize"][data-entry="0"]').click();
+  await sleep(300);
+  var sets0 = w.HIERRO.state.data.activeSession.entries[0].sets;
+  check('"Igualar" copia la primera serie a todas', sets0.every(function (x) { return x.weight === 55 && x.reps === 7; }),
+    JSON.stringify(sets0.map(function (x) { return [x.weight, x.reps]; })));
+
+  d = frame.contentDocument;
+  d.querySelector('[data-act="discard"]').click();
+  await sleep(320);
+
+  // ── Progresión automática, 1RM estimado y músculos ────────────────────
+  var P = w.HIERRO.progression;
+  check('1RM: una repetición es medición, no estimación', P.estimate1RM(100, 1) === 100, String(P.estimate1RM(100, 1)));
+  check('1RM: estima 100 kg × 10 como ~133 kg', Math.abs(P.estimate1RM(100, 10) - 133.3) < 0.2, String(P.estimate1RM(100, 10)));
+  check('1RM: se niega a estimar arriba de 12 repeticiones', P.estimate1RM(100, 15) === null, String(P.estimate1RM(100, 15)));
+  var rango = P.repRange('8-10');
+  check('el objetivo "8-10" se lee como rango 8 a 10', rango.min === 8 && rango.max === 10, JSON.stringify(rango));
+
+  // Se entrena HOY: es la sesión más reciente por fecha, que es la que manda.
+  w.location.hash = '#/entrenar';
+  await sleep(320);
+  d = frame.contentDocument;
+  var chipHoy = d.querySelector('[data-act="set-date"][data-value="' + isoLocal(new Date()) + '"]');
+  if (chipHoy) chipHoy.click();
+  await sleep(260);
+  d = frame.contentDocument;
+  d.querySelector('[data-act="start"]').click();
+  await sleep(350);
+  d = frame.contentDocument;
+  var sesion = w.HIERRO.state.data.activeSession;
+  check('la sesión arranca con una sugerencia de progresión', !!(sesion && sesion.entries[0].presc && sesion.entries[0].presc.why), JSON.stringify(sesion && sesion.entries[0].presc));
+
+  var primer = sesion.entries[0];
+  var tope = P.repRange(primer.sets[0].target).max;
+  primer.sets.forEach(function (st) { st.reps = tope; st.done = true; });
+  var pesoAntes = primer.sets[0].weight;
+  d.querySelector('[data-act="finish"]').click();
+  await sleep(450);
+
+  var presc = P.prescriptionFor(primer.ex, { w: pesoAntes, reps: primer.sets[0].target }, 'fuerza');
+  check('series completas: la próxima sesión sube el peso', presc.kind === 'up' && presc.weight > pesoAntes, JSON.stringify(presc));
+  check('la sugerencia explica el motivo', /sube/.test(presc.why), presc.why);
+  check('el historial de un ejercicio queda en orden cronológico', (function () {
+    var h = P.exerciseHistory(primer.ex);
+    return h.length >= 2 && h[h.length - 1].date >= h[0].date;
+  })());
+
+  var musculos = P.muscleStats(7);
+  check('el volumen por músculo se calcula', musculos.length > 0 && musculos[0].volume > 0, JSON.stringify(musculos.slice(0, 2)));
+  check('cada músculo trae su estado de recuperación', musculos.every(function (m) { return m.state === 'listo' || m.state === 'recuperando'; }));
+  check('hay al menos un ejercicio con 1RM estimado', !!P.best1RMOf(primer.ex), primer.ex);
+
   // ── Persistencia ──────────────────────────────────────────────────────
   await new Promise(function (res) {
     frame.addEventListener('load', res, { once: true });
@@ -172,12 +270,22 @@ function finish() {
   await sleep(500);
   w = frame.contentWindow;
   check('la sesión del usuario persiste tras recargar', !!w.HIERRO.state.account, 'sin cuenta activa');
-  check('el historial persiste tras recargar', w.HIERRO.state.data.sessions.length === 1, String(w.HIERRO.state.data.sessions.length));
+  check('el historial persiste tras recargar', w.HIERRO.state.data.sessions.length >= 2, String(w.HIERRO.state.data.sessions.length));
 
   // ── Cambio de unidad ──────────────────────────────────────────────────
   w.location.hash = '#/perfil';
   await sleep(300);
   d = frame.contentDocument;
+  check('el perfil trae la calculadora de discos', !!d.querySelector('#calcWeight'));
+  var calc = d.querySelector('#calcWeight');
+  calc.value = '100';
+  calc.dispatchEvent(new w.Event('input', { bubbles: true }));
+  await sleep(220);
+  d = frame.contentDocument;
+  check('la calculadora muestra los discos del peso escrito',
+    /Barra 20 kg/.test(d.querySelector('#calcPlates').textContent) && /100 kg/.test(d.querySelector('#calcPlates').textContent),
+    d.querySelector('#calcPlates').textContent.slice(0, 90));
+
   var unitSel = d.querySelector('#pfUnit');
   unitSel.value = 'lb';
   unitSel.dispatchEvent(new w.Event('change', { bubbles: true }));
@@ -187,6 +295,27 @@ function finish() {
   check('el peso se convierte a libras en pantalla', /^180,7/.test(d.querySelector('#pfWeight').value), d.querySelector('#pfWeight').value);
   check('la etiqueta del peso usa la unidad activa', /Peso actual \(lb\)/.test(d.querySelector('#main').textContent));
   check('el peso se sigue guardando en kilos', Math.round(w.HIERRO.state.data.profile.weightKg) === 82, String(w.HIERRO.state.data.profile.weightKg));
+
+  // ── Interruptores nuevos del perfil ──────────────────────────────────
+  check('el perfil ofrece pantalla encendida y progresión automática',
+    !!d.querySelector('[data-act="toggle-wake"]') && !!d.querySelector('[data-act="toggle-prog"]'));
+  d.querySelector('[data-act="toggle-wake"]').click();
+  await sleep(280);
+  d = frame.contentDocument;
+  check('la pantalla encendida se puede apagar', w.HIERRO.state.data.prefs.wake === false, String(w.HIERRO.state.data.prefs.wake));
+  d.querySelector('[data-act="toggle-wake"]').click();
+  await sleep(220);
+  d = frame.contentDocument;
+  check('y se puede volver a encender', w.HIERRO.state.data.prefs.wake === true, String(w.HIERRO.state.data.prefs.wake));
+  d.querySelector('[data-act="toggle-prog"]').click();
+  await sleep(280);
+  d = frame.contentDocument;
+  check('la progresión automática se puede desactivar', w.HIERRO.state.data.prefs.prog === false);
+  var sinProg = w.HIERRO.progression.prescriptionFor('squat', { w: 60, reps: '5' }, 'fuerza');
+  check('desactivada, la sugerencia no cambia el peso', sinProg.kind === 'off' && sinProg.weight === 60, JSON.stringify(sinProg));
+  d.querySelector('[data-act="toggle-prog"]').click();
+  await sleep(220);
+  d = frame.contentDocument;
 
   // ── Cambio de contraseña ──────────────────────────────────────────────
   var userid = w.HIERRO.state.users[0].id;

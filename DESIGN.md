@@ -86,6 +86,12 @@ formulario se comporte como una app.
   monumentales a la derecha. Sin tarjetas dentro de tarjetas.
 - **Placa de ejercicio** (`.unit`): pictograma o microfigura en un cuadro negro a la
   izquierda, nombre y grupo muscular, filas de serie y una barra de acciones al pie.
+- **Rutina** (`.routine`): cada tarjeta lista **todos** sus ejercicios con las series, el
+  objetivo y la carga sugerida por el historial. Es una planilla, no un resumen: los números
+  que vas a usar están a la vista antes de empezar. La carga va en tinta, no en amarillo: el
+  amarillo se reserva para la acción.
+- **Barra de fecha** (`.datebar`): panel con el día del entrenamiento y atajos (Hoy, Ayer,
+  Anteanayera). Aparece al elegir rutina y dentro de la sesión, donde se puede corregir.
 - **Fila de serie** (`.setrow`): disco numerado, control de repeticiones, el objetivo de la
   serie al lado del valor real, control de carga y botón de verificación. Si la serie
   terminó por debajo del objetivo, el número real se marca en amarillo. La carga se edita
