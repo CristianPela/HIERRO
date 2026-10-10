@@ -58,14 +58,16 @@ function finish() {
   w.alert = function () {};
 
   check('arranca en la pantalla de acceso', !!d.querySelector('.gate'), 'no se encontró .gate');
-  check('sin perfiles, la pestaña Entrar está deshabilitada', d.querySelector('[data-act="gate-tab"][data-tab="login"]').disabled === true);
-  check('sin perfiles, no hay desplegable vacío de entrada', d.querySelector('#panelLogin').hidden === true);
+  check('sin perfiles no hay pestaña Entrar (no se puede caer en un formulario vacío)', d.querySelector('[data-act="gate-tab"][data-tab="login"]') === null);
+  check('sin perfiles se muestra directamente el alta', !!d.querySelector('form[data-form="register"]') && d.querySelector('form[data-form="register"]').hidden === false);
+  check('sin perfiles el formulario de entrada no está en la página', d.querySelector('form[data-form="login"]') === null);
   check('no hay errores de JS al arrancar', errors.length === 0, errors.join(' | '));
 
   // ── Registro ──────────────────────────────────────────────────────────
   var nameInput = d.querySelector('#regName');
   check('el formulario de registro existe', !!nameInput);
-  d.querySelector('[data-act="gate-tab"][data-tab="register"]').click();
+  var tabAlta = d.querySelector('[data-act="gate-tab"][data-tab="register"]');
+  if (tabAlta) tabAlta.click();
   d.querySelector('#regName').value = 'Tester';
   d.querySelector('#regPass').value = '1234';
   d.querySelector('#regWeight').value = '82';

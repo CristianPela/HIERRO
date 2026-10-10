@@ -688,8 +688,8 @@ function textoInstalar() {
 function viewGate() {
   var hasUsers = state.users.length > 0;
   var tabs = '<div class="gate__tabs" role="tablist" aria-label="Acceso">' +
-    '<button class="gate__tab" role="tab" id="tabLogin" aria-controls="panelLogin" aria-selected="' + (hasUsers ? 'true' : 'false') + '" data-act="gate-tab" data-tab="login"' + (hasUsers ? '' : ' disabled') + '>Entrar</button>' +
-    '<button class="gate__tab" role="tab" id="tabRegister" aria-controls="panelRegister" aria-selected="' + (!hasUsers ? 'true' : 'false') + '" data-act="gate-tab" data-tab="register">Crear perfil</button>' +
+    '<button class="gate__tab" role="tab" id="tabLogin" aria-controls="panelLogin" aria-selected="true" data-act="gate-tab" data-tab="login">Entrar</button>' +
+    '<button class="gate__tab" role="tab" id="tabRegister" aria-controls="panelRegister" aria-selected="false" data-act="gate-tab" data-tab="register">Crear perfil</button>' +
   '</div>';
 
   var loginPanel =
@@ -708,6 +708,8 @@ function viewGate() {
       '</div>' +
       '<p class="alert alert--error" id="loginError" hidden></p>' +
       '<button class="btn btn--sign btn--block" type="submit"><i class="fa-solid fa-arrow-right-to-bracket"></i> Entrar</button>' +
+      '<p class="gate__note">¿Primera vez en este navegador? ' +
+        '<button type="button" class="link-btn" data-act="gate-tab" data-tab="register">Creá tu perfil acá</button>.</p>' +
       '<p class="gate__note">Las cuentas viven en este navegador. No se envían a ningún servidor.</p>' +
     '</form>';
 
@@ -726,7 +728,7 @@ function viewGate() {
 
   var registerPanel =
     '<form class="form" data-form="register" role="tabpanel" id="panelRegister" aria-labelledby="tabRegister" ' + (hasUsers ? 'hidden' : '') + '>' +
-      (hasUsers ? '' : '<p class="alert alert--sign">Primera vez en este dispositivo: creá tu perfil acá. Después vas a poder entrar escribiendo tu nombre.</p>') +
+      (hasUsers ? '' : '<h2 class="gate__h2">Creá tu perfil</h2><p class="gate__note">Es la primera vez en este dispositivo. Elegí un nombre y una contraseña; con eso entrás las próximas veces.</p>') +
       '<div class="field"><label class="field__label" for="regName">Tu nombre</label>' +
         '<input class="input" id="regName" autocomplete="name" required></div>' +
       '<div class="field"><label class="field__label" for="regPass">Contraseña</label>' +
@@ -750,7 +752,9 @@ function viewGate() {
       '<p class="gate__claim">Registrá cada serie en tres toques. La app te dice qué discos cargar en cada lado de la barra.</p>' +
     '</div>' +
     '<div class="gate__band"><i class="fa-solid fa-dumbbell"></i><span>Tu progreso queda en este dispositivo</span></div>' +
-    tabs + '<div class="gate__panel">' + loginPanel + registerPanel + '</div>' +
+    (hasUsers
+      ? tabs + '<div class="gate__panel">' + loginPanel + registerPanel + '</div>'
+      : '<div class="gate__panel">' + registerPanel + '</div>') +
     (enModoApp() ? '' : '<div class="alert">' + textoInstalar() + '</div>') +
   '</div>';
 }
@@ -1358,8 +1362,17 @@ document.addEventListener('click', function (ev) {
     case 'gate-tab':
       var isLogin = el.getAttribute('data-tab') === 'login';
       $$('.gate__tab').forEach(function (t) { t.setAttribute('aria-selected', String(t === el)); });
-      $('[data-form="login"]').hidden = !isLogin;
-      $('[data-form="register"]').hidden = isLogin;
+      var panelEntrar = $('[data-form="login"]');
+      var panelAlta = $('[data-form="register"]');
+      if (panelEntrar) panelEntrar.hidden = !isLogin;
+      if (panelAlta) panelAlta.hidden = isLogin;
+      if (!isLogin && panelAlta) {
+        // Si venía de escribir su nombre en "Entrar", lo llevamos cargado al alta.
+        var destino = $('#regName');
+        var escrito = $('#loginUser') ? $('#loginUser').value.trim() : '';
+        if (destino && !destino.value && escrito) destino.value = escrito;
+        if (destino) destino.focus();
+      }
       break;
 
     case 'pick-objetivo':

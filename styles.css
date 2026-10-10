@@ -663,6 +663,16 @@ main { display: block; }
 .gate__tab[aria-selected="true"] { background: var(--sign); color: var(--sign-ink); font-weight: 700; }
 .gate__panel { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 14px; }
 .gate__note { font-size: var(--t-micro); color: var(--chalk-faint); }
+.gate__h2 {
+  font-family: 'Fira Sans Condensed', system-ui, sans-serif;
+  font-size: var(--t-lg); font-weight: 700; line-height: 1.1;
+  margin-bottom: 4px;
+}
+.link-btn {
+  color: var(--sign); font: inherit;
+  text-decoration: underline; text-underline-offset: 2px;
+  padding: 0; background: none; border: 0; cursor: pointer;
+}
 .gate__users { display: flex; flex-wrap: wrap; gap: 6px; }
 
 /* ── Historial, récords, gráficos ─────────────────────────────────────── */
