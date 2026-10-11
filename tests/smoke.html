@@ -61,7 +61,12 @@ function finish() {
   var w, d;
   var errors = [];
 
-  await new Promise(function (res) { frame.addEventListener('load', res, { once: true }); });
+  // El iframe puede haber terminado de cargar antes de este script (carrera
+  // clásica): se espera el estado real en vez de un evento que ya pasó.
+  await waitFor(function () {
+    var doc = frame.contentDocument;
+    return !!doc && doc.readyState === 'complete' && !!(frame.contentWindow && frame.contentWindow.HIERRO);
+  }, 3000);
   w = frame.contentWindow; d = frame.contentDocument;
   w.addEventListener('error', function (e) { errors.push(String(e.message)); });
   await waitFor(function () { return w.HIERRO && w.HIERRO.CORE; }, 2000);
@@ -96,7 +101,7 @@ function finish() {
   w.addEventListener('error', function (e) { errors.push(String(e.message)); });
   await waitFor(function () { return w.HIERRO && w.HIERRO.ready; }, 2000);
   if (!w.HIERRO) throw new Error('la app no arrancó en el iframe');
-  await w.HIERRO.ready;   // señal real: la app terminó de abrir la base
+  await waitFor(function () { return w.HIERRO && w.HIERRO.listo; }, 800);   // señal real: la app terminó de abrir la base
   await waitFor(function () { return d.querySelector('.gate') || d.querySelector('.tabbar') || d.querySelector('.view'); }, 600);
   w.confirm = function () { return true; };
   w.alert = function () {};
@@ -451,7 +456,7 @@ async function modoRutinas() {
   w.alert = function () {};
   w.prompt = function () { return null; };
   await waitFor(function () { return w.HIERRO && w.HIERRO.ready; });
-  await w.HIERRO.ready;
+  await waitFor(function () { return w.HIERRO && w.HIERRO.listo; }, 800);
   await waitFor(function () { return w.HIERRO.state.account; }, 150);
   check('la sesión del usuario persiste tras recargar', !!w.HIERRO.state.account,
     'traza=' + JSON.stringify(w.HIERRO.bootTrace));
@@ -533,7 +538,7 @@ async function modoRutinas() {
   d.querySelector('form[data-form="login"]').requestSubmit();
   await waitFor(function () { return d.querySelector('#loginError') && !d.querySelector('#loginError').hidden; }, 150);
   check('un nombre inexistente no entra', w.HIERRO.state.account === null);
-  check('el aviso de nombre inexistente se muestra', /no hay ningún usuario/i.test(d.querySelector('#loginError').textContent), d.querySelector('#loginError').textContent);
+  check('el aviso de nombre inexistente se muestra', /no hay ninguna cuenta|no hay ningún usuario/i.test(d.querySelector('#loginError').textContent), d.querySelector('#loginError').textContent);
 
   d.querySelector('#loginUser').value = w.HIERRO.state.users[0].name;
   d.querySelector('#loginPass').value = 'nueva1234';
@@ -643,7 +648,7 @@ async function modoRutinas() {
   w.alert = function () {};
   w.prompt = function () { return null; };
   await waitFor(function () { return w.HIERRO && w.HIERRO.ready; });
-  await w.HIERRO.ready;
+  await waitFor(function () { return w.HIERRO && w.HIERRO.listo; }, 800);
   await waitFor(function () { return w.HIERRO.state.users.length > 0; }, 300);
 
   check('los datos del formato viejo se migran solos', w.HIERRO.state.users.length === 1 && w.HIERRO.state.users[0].name === 'Viejo',
@@ -660,7 +665,7 @@ async function modoRutinas() {
   w = frame.contentWindow; d = frame.contentDocument;
   w.addEventListener('error', function (e) { errors.push(String(e.message)); });
   await waitFor(function () { return w.HIERRO && w.HIERRO.ready; });
-  await w.HIERRO.ready;
+  await waitFor(function () { return w.HIERRO && w.HIERRO.listo; }, 800);
   await waitFor(function () { return !!d.querySelector('#loginUser'); }, 300);
   d.querySelector('#loginUser').value = 'Viejo';
   d.querySelector('#loginPass').value = claveVieja;
@@ -681,13 +686,50 @@ async function modoRutinas() {
   w = frame.contentWindow; d = frame.contentDocument;
   w.addEventListener('error', function (e) { errors.push(String(e.message)); });
   await waitFor(function () { return w.HIERRO && w.HIERRO.ready; });
-  await w.HIERRO.ready;
+  await waitFor(function () { return w.HIERRO && w.HIERRO.listo; }, 800);
   await waitFor(function () { return w.HIERRO.state.users.length > 0; }, 300);
   check('si la base se vacía, la cuenta vuelve desde el espejo', w.HIERRO.state.users.length > 0,
     'usuarios=' + w.HIERRO.state.users.length);
   check('y el historial también se recupera',
     !!(w.HIERRO.state.account && w.HIERRO.state.data && w.HIERRO.state.data.sessions.length > 0),
     'sesiones=' + (w.HIERRO.state.data ? w.HIERRO.state.data.sessions.length : 'sin datos'));
+
+  // ── Traer una cuenta de otro navegador (celular vs app instalada) ─────
+  var usuarioTraido = w.HIERRO.state.users[0];
+  var enlaceTraido = w.HIERRO.usuarios.enlace(usuarioTraido);
+  d = frame.contentDocument;
+  d.querySelector('[data-act="logout"]').click();
+  await waitFor(function () { return !!d.querySelector('.gate'); }, 200);
+  d = frame.contentDocument;
+  check('el acceso ofrece traer la cuenta de otro navegador', !!d.querySelector('[data-act="gate-traer"]'));
+  check('y ofrece empezar de cero en el dispositivo', !!d.querySelector('[data-act="gate-reset"]'));
+  d.querySelector('[data-act="gate-traer"]').click();
+  await waitFor(function () { return !!d.querySelector('#traerCodigo'); }, 200);
+  d = frame.contentDocument;
+  check('se puede pegar el código de acceso', !!d.querySelector('#traerCodigo'));
+  d.querySelector('#traerCodigo').value = enlaceTraido;
+  d.querySelector('form[data-form="traer"]').requestSubmit();
+  await waitFor(function () {
+    var inp = d.querySelector('#loginUser');
+    return !!inp && inp.value === usuarioTraido.name;
+  }, 300);
+  check('la cuenta traída queda lista para entrar con la contraseña de siempre',
+    (d.querySelector('#loginUser') || {}).value === usuarioTraido.name, (d.querySelector('#loginUser') || {}).value);
+
+  // ── Empezar de cero en este dispositivo ───────────────────────────────
+  d.querySelector('[data-act="gate-reset"]').click();
+  await waitFor(function () { return !!d.querySelector('#resetConfirm'); }, 200);
+  d = frame.contentDocument;
+  d.querySelector('#resetConfirm').value = 'BORRAR';
+  d.querySelector('form[data-form="reset-dispositivo"]').requestSubmit();
+  await waitFor(function () { return w.HIERRO.state.users.length === 0; }, 300);
+  await waitFor(function () { return !!d.querySelector('[data-act="gate-alta-admin"]'); }, 300);
+  check('empezar de cero borra las cuentas de este dispositivo', w.HIERRO.state.users.length === 0,
+    'usuarios=' + w.HIERRO.state.users.length);
+  d = frame.contentDocument;
+  check('y deja la pantalla lista para crear al administrador', !!d.querySelector('[data-act="gate-alta-admin"]'),
+    'main=' + (d.querySelector('#main') ? d.querySelector('#main').textContent.slice(0, 150) : 'sin main') +
+    ' | panel=' + w.HIERRO.state.gatePanel);
 
   check('sin errores de JS durante todo el recorrido', errors.length === 0, errors.join(' | '));
   finish();

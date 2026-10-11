@@ -433,9 +433,11 @@ function usuarioPorNombre(nombre) {
 
 function esAdmin() { return !!(state.account && state.account.role === 'admin'); }
 
-/* Crea un usuario y su documento de datos. Devuelve el usuario creado. */
+/* Crea un usuario y su documento de datos. Devuelve el usuario creado.
+   La contraseña se recorta: en el celular el teclado agrega espacios al final
+   más seguido de lo que uno cree, y eso hace fallar un ingreso idéntico. */
 function crearUsuario(nombre, password, rol, profile) {
-  return CORE.crypto.newCredential(password).then(function (cred) {
+  return CORE.crypto.newCredential(String(password).trim()).then(function (cred) {
     var user = CORE.validate.validateUser({
       id: uid(), name: nombre.trim(), role: rol === 'admin' ? 'admin' : 'user',
       salt: cred.salt, hash: cred.hash, iterations: cred.iterations,
@@ -489,10 +491,14 @@ function login(ev) {
   var aviso = $('#loginError');
   if (aviso) aviso.hidden = true;   // cada intento limpia el aviso anterior
   var typed = ($('#loginUser').value || '').trim();
-  var pass = $('#loginPass').value;
+  var pass = String($('#loginPass').value || '').trim();
   if (!typed) return formError('#loginError', 'Escribí tu usuario.');
   var acc = usuarioPorNombre(typed);
-  if (!acc) return formError('#loginError', 'En este dispositivo no hay ningún usuario con ese nombre. Los da de alta el administrador.');
+  if (!acc) {
+    return formError('#loginError', 'En este dispositivo no hay ninguna cuenta con ese nombre. ' +
+      'Ojo: la app instalada en el celular guarda sus datos aparte del navegador, así que puede que tu cuenta esté en el otro. ' +
+      'Usá «Traer mi cuenta» para pasarla, o pedile el alta al administrador.');
+  }
   if (acc.disabled) return formError('#loginError', 'Ese usuario está desactivado. Pedile al administrador que lo habilite.');
 
   // Las cuentas del formato viejo tenían otra derivación: se aceptan una vez
@@ -552,6 +558,48 @@ function logout() {
   cerrarSesionLocal().then(function () {
     go('#/acceso');
     toast('Sesión cerrada.');
+  });
+}
+
+/* Trae a este dispositivo una cuenta creada en otro navegador o teléfono.
+   Acepta el enlace completo o solo el código. */
+function traerCuenta(ev) {
+  ev.preventDefault();
+  var bruto = String($('#traerCodigo').value || '').trim();
+  var m = /[#&?]?alta=([A-Za-z0-9+/=_%-]+)/.exec(bruto);
+  var pack = CORE.packs.unpackAccount(m ? decodeURIComponent(m[1]) : bruto);
+  if (!pack) {
+    return formError('#traerError', 'Ese código no es válido. Copiá el enlace completo desde Perfil → Usuarios → Enlace.');
+  }
+  importarPaqueteAlta(pack).then(function (user) {
+    state.gatePanel = 'login';
+    render();
+    var inp = $('#loginUser');
+    if (inp) inp.value = user.name;
+    toast('Listo. Entrá como ' + user.name + ' con la contraseña de siempre.', 'sign');
+  }).catch(function (e) {
+    formError('#traerError', 'No se pudo traer la cuenta: ' + e.message);
+  });
+}
+
+/* Deja el dispositivo en cero: cuentas y entrenamientos de acá. */
+function borrarDispositivo(ev) {
+  ev.preventDefault();
+  if (String($('#resetConfirm').value || '').trim().toUpperCase() !== 'BORRAR') {
+    return formError('#resetError', 'Escribí BORRAR (así, con mayúsculas) para confirmar.');
+  }
+  CORE.store.reset().then(function () {
+    state.users = [];
+    state.account = null;
+    state.data = null;
+    state.altaPendiente = null;
+    state.gatePanel = 'login';
+    return CORE.store.setSessionId(null);
+  }).then(function () {
+    render();
+    toast('Este dispositivo quedó en cero. Ahora podés crear la cuenta del administrador.', 'sign');
+  }).catch(function (e) {
+    formError('#resetError', 'No se pudo borrar: ' + e.message);
   });
 }
 
@@ -1318,6 +1366,40 @@ function viewGate() {
     '</div>';
   }
 
+  /* Traer una cuenta que vive en el otro lado: en el celular la app instalada
+     guarda sus datos aparte del navegador, así que la misma cuenta puede estar
+     en uno y no en el otro. */
+  var traerPanel =
+    '<form class="form" data-form="traer">' +
+      '<h2 class="gate__h2">Traer mi cuenta</h2>' +
+      '<p class="gate__note">Copiá el <b>código de acceso</b> desde el navegador o la app donde ya entrás ' +
+        '(Perfil → Usuarios → <b>Enlace</b>) y pegalo acá. Tu usuario queda en este dispositivo con la misma ' +
+        'contraseña de siempre.</p>' +
+      '<div class="field"><label class="field__label" for="traerCodigo">Código o enlace</label>' +
+        '<textarea class="input" id="traerCodigo" rows="3" autocomplete="off" placeholder="Pegá acá el enlace completo"></textarea>' +
+        '<span class="field__hint">Podés pegar el enlace entero: la app saca el código sola.</span></div>' +
+      '<p class="alert alert--error" id="traerError" hidden></p>' +
+      '<button class="btn btn--sign btn--block" type="submit"><i class="fa-solid fa-download"></i> Traer la cuenta</button>' +
+      '<button class="btn btn--ghost btn--block" type="button" data-act="gate-traer" data-value="volver">Volver al ingreso</button>' +
+      '<p class="gate__note">El código lleva tu usuario y tu clave cifrada, nunca la contraseña en claro.</p>' +
+    '</form>';
+
+  /* Última salida para un dispositivo con datos viejos o una cuenta cuya clave
+     no se recuerda: dejarlo en cero y empezar de nuevo. */
+  var resetPanel =
+    '<form class="form" data-form="reset-dispositivo">' +
+      '<h2 class="gate__h2">Empezar de cero acá</h2>' +
+      '<p class="alert alert--error">Se borran <b>todas las cuentas y todos los entrenamientos</b> guardados en ' +
+        '<b>este dispositivo</b>. Lo que esté en el navegador o en otro teléfono no se toca.</p>' +
+      '<p class="gate__note">Si podés entrar desde el otro lado, exportá antes una copia: Perfil → ' +
+        '<b>Respaldo completo del dispositivo</b>.</p>' +
+      '<div class="field"><label class="field__label" for="resetConfirm">Escribí BORRAR para confirmar</label>' +
+        '<input class="input" id="resetConfirm" autocomplete="off" placeholder="BORRAR"></div>' +
+      '<p class="alert alert--error" id="resetError" hidden></p>' +
+      '<button class="btn btn--sign btn--block" type="submit"><i class="fa-solid fa-trash"></i> Borrar todo de este dispositivo</button>' +
+      '<button class="btn btn--ghost btn--block" type="button" data-act="gate-reset" data-value="volver">Cancelar</button>' +
+    '</form>';
+
   var loginPanel =
     '<form class="form" data-form="login" id="panelLogin">' +
       '<h2 class="gate__h2">Entrar</h2>' +
@@ -1335,6 +1417,8 @@ function viewGate() {
       '<p class="alert alert--error" id="loginError" hidden></p>' +
       '<button class="btn btn--sign btn--block" type="submit"><i class="fa-solid fa-arrow-right-to-bracket"></i> Entrar</button>' +
       '<p class="gate__note">Las cuentas las da de alta el administrador. Si te pasó un enlace de alta, abrilo en este navegador.</p>' +
+      '<p class="gate__note">Esta app guarda todo <b>aparte del navegador</b> cuando la instalás en el celular. ' +
+        'Si tu cuenta quedó en el otro lado, <button type="button" class="link-btn" data-act="gate-traer">traé tu cuenta acá</button>.</p>' +
       (hasUsers
         ? ''
         : '<p class="gate__note">Este dispositivo todavía no tiene ninguna cuenta. ' +
@@ -1372,8 +1456,19 @@ function viewGate() {
       '<button class="btn btn--ghost btn--block" type="button" data-act="gate-alta-admin" data-value="volver">Volver al ingreso</button>' +
     '</form>';
 
+  var panel = loginPanel;
+  if (state.gatePanel === 'traer') panel = traerPanel;
+  else if (state.gatePanel === 'reset') panel = resetPanel;
+  else if (altaAdmin && !hasUsers) panel = altaAdminPanel;
+
   return '<div class="gate">' + cabeza + band +
-    '<div class="gate__panel">' + (altaAdmin && !hasUsers ? altaAdminPanel : loginPanel) + '</div>' +
+    '<div class="gate__panel">' + panel + '</div>' +
+    '<p class="gate__note" style="text-align:center">' +
+      (state.gatePanel === 'login'
+        ? '<button type="button" class="link-btn" data-act="gate-traer">Traer mi cuenta de otro navegador</button> · ' +
+          '<button type="button" class="link-btn" data-act="gate-reset">Empezar de cero en este dispositivo</button>'
+        : '') +
+    '</p>' +
     (enModoApp() ? '' : '<div class="alert">' + textoInstalar() + '</div>') +
   '</div>';
 }
@@ -2078,7 +2173,9 @@ function usuariosAdminHtml() {
       '<span class="section__note">' + state.users.length + ' en este dispositivo</span></div>' +
       '<div class="rows">' + filas + '</div>' +
       '<div class="alert" style="margin-top:10px">Vos das de alta a los usuarios de este dispositivo con su usuario y su contraseña. ' +
-        'Cada persona ve solo sus entrenamientos: nadie más puede leerlos, ni siquiera el administrador.</div>' +
+        'Cada persona ve solo sus entrenamientos: nadie más puede leerlos, ni siquiera el administrador.' +
+        '<br><br><b>Ojo con el celular:</b> la app instalada guarda sus datos aparte del navegador. Si alguien te dice que su usuario no existe ' +
+        'desde el atajo del teléfono, generá su <b>Enlace</b> y pegalo en esa pantalla de acceso (o que use «Traer mi cuenta»).</div>' +
 
       '<form class="form" data-form="nuevo-usuario" style="margin-top:14px">' +
         '<h3 class="gate__h2">Alta de usuario</h3>' +
@@ -2198,7 +2295,7 @@ function viewProfile() {
         '<button class="row-link" data-act="pass-toggle"><span class="row-link__icon"><i class="fa-solid fa-key"></i></span><span class="row-link__text"><span class="row-link__name">Cambiar mi contraseña</span><span class="row-link__desc">Se guarda cifrada con PBKDF2 y sal propia</span></span></button>' +
         '<button class="row-link" data-act="export"><span class="row-link__icon"><i class="fa-solid fa-file-export"></i></span><span class="row-link__text"><span class="row-link__name">Exportar mis datos</span><span class="row-link__desc">JSON con tu historial completo</span></span></button>' +
         '<button class="row-link" data-act="export-csv"><span class="row-link__icon"><i class="fa-solid fa-table"></i></span><span class="row-link__text"><span class="row-link__name">Exportar historial (CSV)</span><span class="row-link__desc">Una fila por serie, para Excel o Google Sheets</span></span></button>' +
-        '<button class="row-link" data-act="import"><span class="row-link__icon"><i class="fa-solid fa-file-import"></i></span><span class="row-link__text"><span class="row-link__name">Importar copia</span><span class="row-link__desc">JSON de HIERRO o CSV del historial</span></span></button>' +
+        '<button class="row-link" data-act="import"><span class="row-link__icon"><i class="fa-solid fa-file-import"></i></span><span class="row-link__text"><span class="row-link__name">Importar copia</span><span class="row-link__desc">JSON de HIERRO o CSV del historial: sirve para pasar todo a otro navegador o al celular</span></span></button>' +
         '<button class="row-link" data-act="wipe"><span class="row-link__icon"><i class="fa-solid fa-trash"></i></span><span class="row-link__text"><span class="row-link__name">Borrar mis entrenamientos</span><span class="row-link__desc">Sesiones, récords y peso corporal. La cuenta queda</span></span></button>' +
         '<button class="row-link" data-act="logout"><span class="row-link__icon"><i class="fa-solid fa-right-from-bracket"></i></span><span class="row-link__text"><span class="row-link__name">Cerrar sesión</span><span class="row-link__desc">Volver a la pantalla de acceso</span></span></button>' +
       '</div>' +
@@ -2478,6 +2575,14 @@ document.addEventListener('click', function (ev) {
     /* Acceso: el alta del administrador es un enlace, no la pantalla principal. */
     case 'gate-alta-admin':
       state.gatePanel = el.getAttribute('data-value') === 'volver' ? 'login' : 'alta-admin';
+      render();
+      break;
+    case 'gate-traer':
+      state.gatePanel = el.getAttribute('data-value') === 'volver' ? 'login' : 'traer';
+      render();
+      break;
+    case 'gate-reset':
+      state.gatePanel = el.getAttribute('data-value') === 'volver' ? 'login' : 'reset';
       render();
       break;
 
@@ -2930,6 +3035,8 @@ document.addEventListener('submit', function (ev) {
   var form = ev.target.getAttribute('data-form');
   if (form === 'alta-admin') altaAdministrador(ev);
   else if (form === 'login') login(ev);
+  else if (form === 'traer') traerCuenta(ev);
+  else if (form === 'reset-dispositivo') borrarDispositivo(ev);
   else if (form === 'password') changePassword(ev);
   else if (form === 'nuevo-usuario') altaDeUsuario(ev);
 });
@@ -3237,6 +3344,7 @@ function boot() {
       EjTimer.recuperar();
     }
     readyResolve(true);
+    if (window.HIERRO) window.HIERRO.listo = true;   // señal síncrona para pruebas e integraciones
   }).catch(function (e) {
     var m = document.getElementById('main');
     if (m) {
@@ -3244,6 +3352,7 @@ function boot() {
         esc(e && e.message ? e.message : 'error desconocido') + '</div></div>';
     }
     readyResolve(false);
+    if (window.HIERRO) window.HIERRO.listo = 'error';
   });
 }
 boot();
