@@ -366,6 +366,86 @@ main { display: block; }
 .datebar .field { gap: 5px; }
 .datebar .gate__note { margin: 0; }
 
+/* ── Armado del día: grupos musculares y ejercicios elegibles ───────────── */
+.filters--grupos { gap: 8px; }
+.chip--grupo { gap: 7px; font-weight: 600; }
+.chip__count {
+  font-size: var(--t-micro); font-variant-numeric: tabular-nums;
+  opacity: .65; font-weight: 600;
+}
+.chip[aria-pressed="true"] .chip__count { opacity: .85; }
+
+.pick {
+  display: grid; grid-template-columns: 34px minmax(0, 1fr) auto;
+  align-items: center; gap: 10px; width: 100%; text-align: left;
+  padding: 11px 13px; border: 0; border-bottom: 1px solid var(--line);
+  background: none; color: var(--chalk); font: inherit; cursor: pointer;
+  min-height: 54px;
+}
+.pick:last-of-type { border-bottom: 0; }
+.pick.is-on { background: var(--panel-2); }
+.pick__mark {
+  display: grid; place-items: center; width: 30px; height: 30px;
+  border: 1px solid var(--line-2); border-radius: var(--radius-sm);
+  color: var(--chalk-faint); font-size: 13px;
+}
+.pick.is-on .pick__mark {
+  background: var(--sign); border-color: var(--sign); color: #111;
+}
+.pick__text { display: grid; gap: 2px; min-width: 0; }
+.pick__name { font-size: var(--t-sm); font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pick__meta { font-size: var(--t-micro); color: var(--chalk-faint); }
+.pick__load {
+  font-family: 'Fira Sans Condensed', system-ui, sans-serif;
+  font-size: var(--t-md); font-weight: 700; font-variant-numeric: tabular-nums; white-space: nowrap;
+}
+.pick.is-on .pick__load { color: var(--sign); }
+
+.builder-bar {
+  position: sticky; bottom: 78px; z-index: 4;
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  margin-top: 14px; padding: 10px 12px;
+  background: var(--panel); border: 1px solid var(--line-2);
+  border-radius: var(--radius); box-shadow: 0 8px 24px rgba(0,0,0,.45);
+}
+.builder-bar__info { font-size: var(--t-sm); color: var(--chalk-dim); }
+.builder-bar__info b {
+  font-family: 'Fira Sans Condensed', system-ui, sans-serif;
+  font-size: var(--t-lg); color: var(--chalk);
+}
+
+/* ── Cronómetro del ejercicio ───────────────────────────────────────────── */
+.ejtimer {
+  display: grid; gap: 10px;
+  padding: 11px 13px; border-bottom: 1px solid var(--line);
+  background: var(--panel-2);
+}
+.ejtimer.is-on { background: linear-gradient(180deg, rgba(255,199,44,.10), transparent); }
+.ejtimer.is-done { background: linear-gradient(180deg, rgba(255,199,44,.16), transparent); }
+.ejtimer__head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.ejtimer__label {
+  display: flex; align-items: center; gap: 7px;
+  font-size: var(--t-micro); letter-spacing: .04em; text-transform: uppercase; color: var(--chalk-faint);
+}
+.ejtimer__time {
+  font-family: 'Fira Sans Condensed', system-ui, sans-serif;
+  font-size: var(--t-xl); font-weight: 700; font-variant-numeric: tabular-nums; line-height: 1;
+}
+.ejtimer__time.is-fin { color: var(--sign); letter-spacing: .04em; }
+.ejtimer__conf {
+  font-family: 'Fira Sans Condensed', system-ui, sans-serif;
+  font-size: var(--t-md); color: var(--chalk-dim); font-variant-numeric: tabular-nums;
+}
+.ejtimer__chips { display: flex; flex-wrap: wrap; align-items: center; gap: 7px; }
+.ejtimer__actions { display: flex; gap: 8px; }
+.ejtimer__actions .btn { flex: 1; }
+.ejtimer__fin { margin: 0; font-size: var(--t-sm); color: var(--sign); }
+.chip--mini { padding: 5px 10px; font-size: var(--t-micro); min-height: 32px; }
+.input--mini {
+  width: 74px; min-height: 32px; padding: 5px 9px;
+  font-size: var(--t-sm); text-align: center;
+}
+
 /* Tira de los últimos 7 días en el panel de inicio. */
 .weekstrip { display: flex; gap: 6px; }
 .weekstrip__day {

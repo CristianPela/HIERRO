@@ -146,6 +146,22 @@ test('la validación normaliza datos corruptos en vez de aceptarlos', () => {
   assert.equal(d.userId, 'u9');
 });
 
+test('la validación NO descarta el perfil físico ni el borrador del día', () => {
+  const doc = {
+    profile: { name: 'Cristian', weightKg: 82, heightCm: 178, objetivo: 'fuerza', level: 'Intermedio' },
+    borrador: { grupos: ['Pecho'], ejercicios: ['bench_press'] },
+    sessions: [{ id: 's1', date: '2026-10-10', entries: [] }],
+  };
+  const d = validate.validateDocument(doc, 'u1');
+  assert.equal(d.profile.weightKg, 82, 'el peso no puede perderse al guardar');
+  assert.equal(d.profile.objetivo, 'fuerza');
+  assert.deepEqual(d.borrador.grupos, ['Pecho']);
+  assert.equal(d.sessions.length, 1);
+  // Y sin borrador, queda uno vacío pero válido.
+  const vacio = validate.validateDocument({ profile: { weightKg: 80 } }, 'u2');
+  assert.deepEqual(vacio.borrador, { grupos: [], ejercicios: [] });
+});
+
 test('la validación de usuario rechaza lo incompleto y ordena el rol', () => {
   assert.equal(validate.validateUser({ name: 'sin id' }), null);
   assert.equal(validate.validateUser(null), null);

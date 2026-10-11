@@ -32,6 +32,15 @@
     userPrefix: 'hierro.v1.user.',
   };
 
+  /* Espejo en localStorage de las cuentas y del documento activo. IndexedDB
+     puede vaciarse (modo privado, limpieza del navegador, permisos), y quedarse
+     sin poder entrar es lo peor que puede pasar. Son unos pocos KB. */
+  var ESPEJO = {
+    users: 'hierro.v2.users',
+    session: 'hierro.v2.session',
+    docPrefix: 'hierro.v2.doc.',
+  };
+
   /* ── Codificación ────────────────────────────────────────────────────── */
 
   function bytesToBase64(bytes) {
@@ -164,6 +173,9 @@
       userId: userId,
       schema: SCHEMA_VERSION,
       savedAt: Date.now(),
+      /* El perfil físico viaja en el documento: peso, altura, objetivo y nivel
+         son los que alimentan cargas, volúmenes y recuperación. */
+      profile: d.profile && typeof d.profile === 'object' ? d.profile : null,
       prefs: ensureObject(d.prefs),
       sessions: ensureArray(d.sessions).filter(function (s) { return s && typeof s === 'object'; }),
       prs: ensureObject(d.prs),
@@ -171,6 +183,8 @@
       activeSession: d.activeSession && typeof d.activeSession === 'object' ? d.activeSession : null,
       lastRoutine: d.lastRoutine || null,
       customExercises: ensureArray(d.customExercises),
+      /* Borrador del día que estás armando por grupo muscular. */
+      borrador: d.borrador && typeof d.borrador === 'object' ? d.borrador : { grupos: [], ejercicios: [] },
     };
   }
 
@@ -294,6 +308,44 @@
       .map(function (s) { s.startedAt = new Date(s.date + 'T12:00:00').getTime(); s.finishedAt = s.startedAt; return s; });
   }
 
+  /* ── Espejo de seguridad ─────────────────────────────────────────────────
+     Se copian las cuentas (y el documento del usuario) a localStorage. Si la
+     base se vacía, al abrir se recupera de acá: nunca te quedás sin poder
+     entrar. Las escrituras del espejo nunca rompen la principal. */
+
+  function espejoUsuarios() {
+    var lista = lsGet(ESPEJO.users, []);
+    return Array.isArray(lista) ? lista : [];
+  }
+
+  function espejoGuardarUsuario(user) {
+    if (store.backend !== 'idb' || !root.localStorage) return;
+    var lista = espejoUsuarios();
+    var i = -1;
+    for (var k = 0; k < lista.length; k++) if (lista[k] && lista[k].id === user.id) i = k;
+    if (i === -1) lista.push(user); else lista[i] = user;
+    lsPut(ESPEJO.users, lista);
+  }
+
+  function espejoBorrarUsuario(id) {
+    if (!root.localStorage) return;
+    lsPut(ESPEJO.users, espejoUsuarios().filter(function (u) { return u && u.id !== id; }));
+    lsDel(ESPEJO.docPrefix + id);
+  }
+
+  /* Une lo que hay en la base con lo que hay en el espejo. La base manda; el
+     espejo solo repone lo que falta (por ejemplo, si se vació la base). */
+  function unirUsuarios(principales, espejo) {
+    var out = principales.slice();
+    var ids = {};
+    out.forEach(function (u) { ids[u.id] = true; });
+    espejo.forEach(function (u) {
+      var limpio = validateUser(u);
+      if (limpio && !ids[limpio.id]) { out.push(limpio); ids[limpio.id] = true; }
+    });
+    return out;
+  }
+
   /* ── Almacenamiento ──────────────────────────────────────────────────────
      Índice por backend. La app usa siempre la misma interfaz asíncrona.            */
 
@@ -403,13 +455,25 @@
 
     /* Usuarios ------------------------------------------------------------ */
     users: function () {
-      if (store.backend === 'idb') return idbGetAll('users').then(function (list) { return list.map(validateUser).filter(Boolean); });
-      return Promise.resolve((lsGet(LEGACY.users, []) || []).map(validateUser).filter(Boolean));
+      var leerPrincipal = store.backend === 'idb'
+        ? idbGetAll('users').then(function (list) { return list; })
+        : Promise.resolve(lsGet(LEGACY.users, []) || []);
+      return leerPrincipal.then(function (list) {
+        var limpios = (list || []).map(validateUser).filter(Boolean);
+        var unidos = unirUsuarios(limpios, espejoUsuarios());
+        // Si el espejo repuso alguna cuenta, se repara la base.
+        if (unidos.length > limpios.length && store.backend === 'idb') {
+          log('espejo-repone', String(unidos.length - limpios.length));
+          unidos.slice(limpios.length).forEach(function (u) { idbPut('users', u); });
+        }
+        return unidos;
+      });
     },
     saveUser: function (user) {
       var u = validateUser(user);
       if (!u) { log('saveUser-invalido'); return Promise.reject(new Error('usuario inválido')); }
       log('saveUser', u.name);
+      espejoGuardarUsuario(u);
       if (store.backend === 'idb') return idbPut('users', u).then(function () { return u; });
       var list = (lsGet(LEGACY.users, []) || []);
       var i = list.findIndex(function (x) { return x.id === u.id; });
@@ -418,6 +482,7 @@
       return Promise.resolve(u);
     },
     deleteUser: function (id) {
+      espejoBorrarUsuario(id);
       if (store.backend === 'idb') {
         return Promise.all([idbDel('users', id), idbDel('data', id)]).then(function () { return true; });
       }
@@ -428,11 +493,23 @@
 
     /* Datos de entrenamiento ---------------------------------------------- */
     document: function (userId) {
-      if (store.backend === 'idb') return idbGet('data', userId);
-      return Promise.resolve(lsGet(LEGACY.userPrefix + userId, null));
+      var leerPrincipal = store.backend === 'idb'
+        ? idbGet('data', userId)
+        : Promise.resolve(lsGet(LEGACY.userPrefix + userId, null));
+      return leerPrincipal.then(function (doc) {
+        if (doc && Array.isArray(doc.sessions)) return doc;
+        var copia = lsGet(ESPEJO.docPrefix + userId, null);
+        if (copia && Array.isArray(copia.sessions)) {
+          log('espejo-doc-repone', userId);
+          if (store.backend === 'idb') idbPut('data', validateDocument(copia, userId));
+          return validateDocument(copia, userId);
+        }
+        return doc;
+      });
     },
     saveDocument: function (doc) {
       var d = validateDocument(doc, doc.userId);
+      try { lsPut(ESPEJO.docPrefix + d.userId, d); } catch (e) { /* sin espejo: sigue la base */ }
       if (store.backend === 'idb') return idbPut('data', d).then(function () { return d; });
       lsPut(LEGACY.userPrefix + d.userId, d);
       return Promise.resolve(d);
@@ -440,14 +517,23 @@
 
     /* Sesión activa -------------------------------------------------------- */
     sessionId: function () {
-      if (store.backend === 'idb') {
-        return idbGet('meta', 'sessionId').then(function (registro) {
-          return registro && registro.value !== undefined ? registro.value : null;
-        });
-      }
-      return Promise.resolve(lsGet(LEGACY.session, null));
+      var leerPrincipal = store.backend === 'idb'
+        ? idbGet('meta', 'sessionId').then(function (registro) {
+            return registro && registro.value !== undefined ? registro.value : null;
+          })
+        : Promise.resolve(lsGet(LEGACY.session, null));
+      return leerPrincipal.then(function (id) {
+        if (id) return id;
+        var copia = lsGet(ESPEJO.session, null);
+        if (copia) {
+          log('espejo-sesion-repone');
+          if (store.backend === 'idb') idbPut('meta', { key: 'sessionId', value: copia });
+        }
+        return copia || null;
+      });
     },
     setSessionId: function (id) {
+      try { lsPut(ESPEJO.session, id); } catch (e) {}
       if (store.backend === 'idb') return idbPut('meta', { key: 'sessionId', value: id }).then(function () { return id; });
       lsPut(LEGACY.session, id);
       return Promise.resolve(id);
@@ -510,19 +596,21 @@
     close: function () {
       if (store.db) { try { store.db.close(); } catch (e) {} store.db = null; }
     },
-    /* Vacía la base sin borrarla. Borrar la base entera deja una operación
-       pendiente que bloquea la próxima apertura; vaciar las tablas no. */
-    reset: function () {
-      if (store.backend !== 'idb') {
-        try { root.localStorage.clear(); } catch (e) {}
-        return Promise.resolve(true);
-      }
+    /* Vacía la base principal SIN tocar el espejo de localStorage: al volver a
+       abrir, las cuentas y el documento se reponen desde ahí. */
+    wipeBase: function () {
+      if (store.backend !== 'idb') return Promise.resolve(true);
       return tx(store.db, ['users', 'data', 'backups', 'meta'], 'readwrite', function (t) {
         t.objectStore('users').clear();
         t.objectStore('data').clear();
         t.objectStore('backups').clear();
         t.objectStore('meta').clear();
       }).then(function () { return true; });
+    },
+    /* Borrado total, espejo incluido: dejar el dispositivo como recién instalado. */
+    reset: function () {
+      try { if (root.localStorage) root.localStorage.clear(); } catch (e) {}
+      return api.wipeBase();
     },
     info: function () {
       return {

@@ -30,7 +30,12 @@
 
 window.GYM_DATA = {
   meta: {
-    version: '2026.10.09',
+    version: '2026.10.10',
+    /* Orden en que se muestran los grupos musculares al armar el día.
+       Editá esta lista para cambiar el orden o el nombre de los grupos. */
+    grupos: ['Pecho', 'Espalda', 'Hombros', 'Bíceps', 'Tríceps', 'Cuádriceps', 'Isquios', 'Glúteos', 'Gemelos', 'Core', 'Cuerpo completo'],
+    // Cuántos ejercicios se sugieren de cada grupo al elegirlo al armar el día.
+    porGrupo: 3,
     attribution: 'Microfiguras: repositorio público yuhonas/free-exercise-db (dominio público).',
     // Base de las microfiguras. Cambiala por tu repositorio si usás figuras propias.
     imageBase: 'https://cdn.jsdelivr.net/gh/yuhonas/free-exercise-db@main/exercises/',

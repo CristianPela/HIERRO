@@ -3,6 +3,39 @@
 Formato basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/).
 Cada bloque de trabajo es un commit propio y termina con la prueba automática en verde.
 
+## [Bloque 2] Armado del día por grupo muscular y cronómetro por ejercicio
+
+### Agregado
+- **Armá tu día por grupo muscular**: pantalla nueva en Entrenar. Elegís los grupos (pecho,
+  espalda, hombros, bíceps, tríceps, cuádriceps, isquios, glúteos, gemelos, core, cuerpo completo),
+  la app propone los ejercicios principales de cada grupo con su **carga sugerida**, y de ahí sacás
+  y agregás los que quieras. El orden y los nombres de los grupos salen de `data/exercises.js`
+  (`meta.grupos`), así que se editan ahí.
+- Las **rutinas listas** quedan en una solapa aparte; la elección de solapa se recuerda.
+- El **borrador del día** se guarda con tus datos: si cerrás la app mientras lo armabas, sigue ahí.
+- **Cronómetro por ejercicio con final automático**: Start, cuenta regresiva y fin solo. Al llegar a
+  cero suena (tres ráfagas agudas, por el canal de medios, se escuchan con música), vibra y manda un
+  **aviso del sistema** si la app quedó en segundo plano. Pausar, seguir, detener y "otra vez".
+- Duración por ejercicio (30 s, 60 s, 90 s, 2 min, 5 min o los segundos que escribas) y **duración
+  por defecto configurable** en Perfil. El final se calcula con hora real: si cerraste la app, al
+  volver te avisa igual.
+- **Perfil → Probar la alarma** y **Activar avisos**, para verificar el sonido antes de confiar en él.
+- La banda inferior muestra el cronómetro en curso, con su etiqueta ("cronómetro" o "descanso").
+- **Espejo de seguridad**: cuentas, sesión y documento se copian a `localStorage`. Si la base
+  principal se vacía, al abrir se repone sola.
+
+### Cambiado
+- **Lo primero que se ve es el ingreso.** El alta del administrador pasó a ser un enlace discreto
+  ("Crear la cuenta del administrador") en vez de la pantalla principal.
+- **Después de entrar**, si falta el perfil físico, la app lleva a Perfil con el aviso
+  "Completá tu perfil". Al completarlo, el aviso se va solo.
+
+### Corregido
+- **Pérdida del perfil físico al guardar**: la validación del documento descartaba `profile`, así que
+  cada guardado borraba peso y altura (quedaban solo en la copia de la cuenta). Encontrado por la
+  prueba automática, con caso unitario agregado.
+- El cronómetro de la banda quedaba congelado mientras corría el del ejercicio.
+
 ## [Bloque 1] Almacenamiento, usuarios y respaldos
 
 ### Agregado

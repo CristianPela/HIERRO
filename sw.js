@@ -7,7 +7,7 @@
    Al publicar cambios, subí el número de VERSION para invalidar la caché vieja.
    ═══════════════════════════════════════════════════════════════════════════ */
 
-var VERSION = 'hierro-v7';
+var VERSION = 'hierro-v8';
 var SHELL = [
   './',
   './index.html',

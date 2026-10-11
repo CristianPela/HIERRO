@@ -64,7 +64,7 @@ function finish() {
   await new Promise(function (res) { frame.addEventListener('load', res, { once: true }); });
   w = frame.contentWindow; d = frame.contentDocument;
   w.addEventListener('error', function (e) { errors.push(String(e.message)); });
-  await waitFor(function () { return w.HIERRO && w.HIERRO.CORE; }, 10000);
+  await waitFor(function () { return w.HIERRO && w.HIERRO.CORE; }, 2000);
 
   // Sin service worker ni cachés: la prueba tiene que correr contra los
   // archivos reales, no contra una copia vieja guardada por el service worker.
@@ -94,9 +94,10 @@ function finish() {
   });
   w = frame.contentWindow; d = frame.contentDocument;
   w.addEventListener('error', function (e) { errors.push(String(e.message)); });
-  await waitFor(function () { return w.HIERRO && w.HIERRO.ready; });
+  await waitFor(function () { return w.HIERRO && w.HIERRO.ready; }, 2000);
+  if (!w.HIERRO) throw new Error('la app no arrancó en el iframe');
   await w.HIERRO.ready;   // señal real: la app terminó de abrir la base
-  await waitFor(function () { return d.querySelector('.gate') || d.querySelector('.tabbar') || d.querySelector('.view'); });
+  await waitFor(function () { return d.querySelector('.gate') || d.querySelector('.tabbar') || d.querySelector('.view'); }, 600);
   w.confirm = function () { return true; };
   w.alert = function () {};
   w.prompt = function () { return null; };
@@ -106,20 +107,24 @@ function finish() {
     ' | traza=' + JSON.stringify(w.HIERRO && w.HIERRO.bootTrace) + ' | backend=' + w.HIERRO.CORE.store.backend());
   check('la base arrancó en IndexedDB', w.HIERRO && w.HIERRO.CORE && w.HIERRO.CORE.store.backend() === 'idb',
     w.HIERRO && w.HIERRO.CORE ? w.HIERRO.CORE.store.backend() : 'sin core');
-  check('sin usuarios no hay formulario de entrada', d.querySelector('form[data-form="login"]') === null);
-  check('sin usuarios se pide el alta del administrador', !!d.querySelector('form[data-form="alta-admin"]'));
+  check('lo primero que aparece es el ingreso', !!d.querySelector('form[data-form="login"]'));
+  check('el alta del administrador NO es la pantalla principal',
+    d.querySelector('form[data-form="alta-admin"]') === null && !!d.querySelector('[data-act="gate-alta-admin"]'));
   check('no hay auto-registro: no existe la pestaña "Crear perfil"', d.querySelector('[data-act="gate-tab"]') === null);
   check('no hay errores de JS al arrancar', errors.length === 0, errors.join(' | '));
 
-  // ── Alta del administrador ────────────────────────────────────────────
+  // ── Alta del administrador (detrás de un enlace) ──────────────────────
+  d.querySelector('[data-act="gate-alta-admin"]').click();
+  await waitFor(function () { return !!d.querySelector('form[data-form="alta-admin"]'); }, 150);
+  d = frame.contentDocument;
+  check('el enlace abre el alta del administrador', !!d.querySelector('form[data-form="alta-admin"]'));
   var nameInput = d.querySelector('#regName');
   check('el formulario de alta existe', !!nameInput);
   d.querySelector('#regName').value = 'Tester';
   d.querySelector('#regPass').value = '1234';
-  d.querySelector('#regWeight').value = '82';
   d.querySelector('[data-act="pick-objetivo"][data-value="fuerza"]').click();
   d.querySelector('form[data-form="alta-admin"]').requestSubmit();
-  await waitFor(function () { return w.HIERRO.state.account; }, 15000);
+  await waitFor(function () { return w.HIERRO.state.account; }, 400);
 
   var st = w.HIERRO.state;
   check('se creó el usuario', st.account && st.account.name === 'Tester', 'account=' + JSON.stringify(st.account && st.account.name));
@@ -131,15 +136,39 @@ function finish() {
   check('el documento se guardó en la base', !!guardado && guardado.schema === 2,
     'traza=' + JSON.stringify(w.HIERRO.bootTrace) + ' leido=' + (guardado ? JSON.stringify(guardado).slice(0, 80) : 'no resolvió'));
   check('el objetivo elegido se guardó', st.data.profile.objetivo === 'fuerza', st.data.profile.objetivo);
-  check('el peso inicial se guardó', st.data.profile.weightKg === 82, String(st.data.profile.weightKg));
+  check('la cuenta quedó espejada en localStorage (seguro contra bases vaciadas)',
+    (w.localStorage.getItem('hierro.v2.users') || '').indexOf('Tester') !== -1);
+
+  // ── Perfil incompleto: lo pide antes de entrenar ──────────────────────
+  await waitFor(function () { return /Completá tu perfil/.test(d.querySelector('#main').textContent); }, 200);
+  check('un usuario sin datos físicos es llevado a completar el perfil',
+    /Completá tu perfil/.test(d.querySelector('#main').textContent));
+  d.querySelector('#pfWeight').value = '82';
+  d.querySelector('#pfWeight').dispatchEvent(new w.Event('change', { bubbles: true }));
+  await waitFor(function () { return w.HIERRO.state.data.profile.weightKg === 82; }, 200);
+  check('el peso se guarda desde el perfil', w.HIERRO.state.data.profile.weightKg === 82, String(w.HIERRO.state.data.profile.weightKg));
+  await waitFor(function () { return !/Completá tu perfil/.test(d.querySelector('#main').textContent); }, 200);
+  check('con el perfil completo deja de pedirlo', !/Completá tu perfil/.test(d.querySelector('#main').textContent));
+  w.location.hash = '#/hoy';
+  await waitFor(function () { return /Hola, Tester/.test(d.querySelector('#main').textContent); }, 200);
 
   // ── Dashboard ─────────────────────────────────────────────────────────
   await waitFor(function () { return /Hola, Tester/.test(d.querySelector('#main').textContent); }, 150);
+/* El modo por defecto del entrenar es "por grupo muscular": para probar las
+   rutinas listas hay que cambiar de solapa. */
+async function modoRutinas() {
+  if (d.querySelector('[data-act="start"]')) return;
+  var chip = d.querySelector('[data-act="picker-mode"][data-value="rutinas"]');
+  if (chip) chip.click();
+  await waitFor(function () { return !!d.querySelector('[data-act="start"]'); }, 200);
+  d = frame.contentDocument;
+}
   check('el dashboard muestra el saludo', /Hola, Tester/.test(d.querySelector('#main').textContent));
   check('la rutina sugerida respeta el objetivo', /Fuerza A/.test(d.querySelector('#main').textContent));
   check('la barra de navegación tiene 4 secciones', d.querySelectorAll('.tab').length === 4);
 
   // ── Inicio de sesión ──────────────────────────────────────────────────
+  await modoRutinas();
   d.querySelector('[data-act="start"]').click();
   await sleep(300);
   var s = w.HIERRO.state.data.activeSession;
@@ -208,8 +237,9 @@ function finish() {
 
   // ── Selector de rutinas ───────────────────────────────────────────────
   w.location.hash = '#/entrenar';
-  await sleep(350);
-  d = frame.contentDocument;
+  await waitFor(function () { return !!d.querySelector('[data-act="picker-mode"]'); }, 200);
+  await modoRutinas();
+  await waitFor(function () { return d.querySelectorAll('.routine').length > 0; }, 200);
   var soloObjetivo = d.querySelectorAll('.routine').length;
   check('sin sesión activa se ve el selector de rutinas', soloObjetivo > 0, String(soloObjetivo));
   d.querySelector('[data-act="filter"][data-value=""]').click();
@@ -231,6 +261,7 @@ function finish() {
   d = frame.contentDocument;
   check('el chip "Ayer" queda seleccionado', d.querySelector('[data-act="set-date"][data-value="' + ayerLocal + '"]').getAttribute('aria-pressed') === 'true');
 
+  await modoRutinas();
   d.querySelector('[data-act="start"]').click();
   await sleep(350);
   d = frame.contentDocument;
@@ -290,6 +321,7 @@ function finish() {
   if (chipHoy) chipHoy.click();
   await sleep(260);
   d = frame.contentDocument;
+  await modoRutinas();
   d.querySelector('[data-act="start"]').click();
   await sleep(350);
   d = frame.contentDocument;
@@ -316,6 +348,98 @@ function finish() {
   check('cada músculo trae su estado de recuperación', musculos.every(function (m) { return m.state === 'listo' || m.state === 'recuperando'; }));
   check('hay al menos un ejercicio con 1RM estimado', !!P.best1RMOf(primer.ex), primer.ex);
 
+  // ── Armado del día por grupo muscular ─────────────────────────────────
+  w.location.hash = '#/entrenar';
+  await waitFor(function () { return !!d.querySelector('[data-act="picker-mode"]'); }, 200);
+  var chipGrupos = d.querySelector('[data-act="picker-mode"][data-value="grupos"]');
+  if (chipGrupos && !d.querySelector('[data-act="toggle-grupo"]')) chipGrupos.click();
+  await waitFor(function () { return !!d.querySelector('[data-act="toggle-grupo"]'); }, 200);
+  d = frame.contentDocument;
+  check('se puede armar el día por grupo muscular', d.querySelectorAll('[data-act="toggle-grupo"]').length >= 8,
+    String(d.querySelectorAll('[data-act="toggle-grupo"]').length));
+  check('los grupos musculares están separados y con nombre',
+    /Grupo muscular|grupo muscular/i.test(d.querySelector('#main').textContent) && /Pecho/.test(d.querySelector('#main').textContent));
+  check('las rutinas listas siguen estando', !!d.querySelector('[data-act="picker-mode"][data-value="rutinas"]'));
+
+  d.querySelector('[data-act="toggle-grupo"][data-value="Pecho"]').click();
+  await waitFor(function () { return w.HIERRO.state.data.borrador.ejercicios.length > 0; }, 200);
+  d = frame.contentDocument;
+  d.querySelector('[data-act="toggle-grupo"][data-value="Tríceps"]').click();
+  await waitFor(function () { return w.HIERRO.state.data.borrador.grupos.length === 2; }, 200);
+  var borr = w.HIERRO.state.data.borrador;
+  check('elegir un grupo trae sus ejercicios', borr.ejercicios.length >= 4, JSON.stringify(borr.ejercicios.length));
+  check('los grupos elegidos quedan registrados', borr.grupos.join('+') === 'Pecho+Tríceps', borr.grupos.join('+'));
+  check('los ejercicios elegidos son de esos grupos', borr.ejercicios.every(function (k) {
+    var ex = null;
+    w.HIERRO.DB.exercises.forEach(function (x) { if (x.key === k) ex = x; });
+    return ex && (ex.muscle === 'Pecho' || ex.muscle === 'Tríceps');
+  }));
+  d = frame.contentDocument;
+  check('el catálogo del día se muestra por grupo', d.querySelectorAll('.board__title').length >= 2,
+    String(d.querySelectorAll('.board__title').length));
+
+  var antesDelDia = borr.ejercicios.length;
+  var primeroDelDia = borr.ejercicios[0];
+  d.querySelector('[data-act="toggle-ejercicio"][data-ex="' + primeroDelDia + '"]').click();
+  await waitFor(function () { return w.HIERRO.state.data.borrador.ejercicios.length === antesDelDia - 1; }, 200);
+  check('se puede sacar un ejercicio del día', w.HIERRO.state.data.borrador.ejercicios.length === antesDelDia - 1);
+
+  d = frame.contentDocument;
+  d.querySelector('[data-act="start-builder"]').click();
+  await waitFor(function () { return w.HIERRO.state.data.activeSession; }, 300);
+  var armada = w.HIERRO.state.data.activeSession;
+  check('empezar arma la sesión con los ejercicios elegidos', armada && armada.entries.length === antesDelDia - 1,
+    armada && String(armada.entries.length));
+  check('la sesión se llama como los grupos elegidos',
+    !!armada && /Pecho/.test(armada.routineName) && /Tríceps/.test(armada.routineName), armada && armada.routineName);
+
+  // ── Cronómetro por ejercicio con final automático ─────────────────────
+  d = frame.contentDocument;
+  await waitFor(function () { return !!d.querySelector('[data-act="timer-start"]'); }, 200);
+  check('cada ejercicio trae cronómetro', !!d.querySelector('[data-act="timer-start"]'));
+  check('arranca con la duración por defecto', /Start 1:30/.test(d.querySelector('[data-act="timer-start"]').textContent),
+    d.querySelector('[data-act="timer-start"]').textContent.trim());
+  d.querySelector('[data-act="timer-set"][data-seg="30"]').click();
+  await waitFor(function () { return /Start 0:30/.test((d.querySelector('[data-act="timer-start"]') || {}).textContent || ''); }, 200);
+  check('se puede cambiar la duración', /Start 0:30/.test(d.querySelector('[data-act="timer-start"]').textContent),
+    d.querySelector('[data-act="timer-start"]').textContent.trim());
+
+  d.querySelector('[data-act="timer-start"]').click();
+  await waitFor(function () {
+    var t = w.HIERRO.state.data.activeSession.timer;
+    return t && t.running;
+  }, 200);
+  check('el cronómetro arranca y queda andando', !!(w.HIERRO.state.data.activeSession.timer || {}).running);
+  check('el cronómetro se guarda con el ejercicio y su duración', (function () {
+    var t = w.HIERRO.state.data.activeSession.timer;
+    return t && t.totalSec === 30 && t.entryIndex === 0;
+  })(), JSON.stringify(w.HIERRO.state.data.activeSession.timer));
+  d = frame.contentDocument;
+  check('mientras corre se ve la cuenta y se puede pausar', !!d.querySelector('[data-act="timer-pause"]'));
+  d.querySelector('[data-act="timer-pause"]').click();
+  await waitFor(function () { return w.HIERRO.state.data.activeSession.timer.running === false; }, 200);
+  check('se puede pausar', w.HIERRO.state.data.activeSession.timer.running === false);
+  d = frame.contentDocument;
+  check('en pausa aparece "Seguir"', !!d.querySelector('[data-act="timer-resume"]'));
+  d.querySelector('[data-act="timer-resume"]').click();
+  await waitFor(function () { return w.HIERRO.state.data.activeSession.timer.running === true; }, 200);
+  check('se puede reanudar', w.HIERRO.state.data.activeSession.timer.running === true);
+
+  // Final automático: se adelanta el reloj del cronómetro para no esperar.
+  w.HIERRO.state.data.activeSession.timer.endsAt = Date.now() + 400;
+  await waitFor(function () {
+    var t = w.HIERRO.state.data.activeSession.timer;
+    return t && t.fired === true;
+  }, 300);
+  check('el cronómetro termina solo, sin tocar nada', !!(w.HIERRO.state.data.activeSession.timer || {}).fired,
+    JSON.stringify(w.HIERRO.state.data.activeSession.timer));
+  d = frame.contentDocument;
+  check('al terminar muestra FIN', /FIN/.test(d.querySelector('#main').textContent));
+  check('al terminar deja de latir', w.HIERRO.state.data.activeSession.timer.running === false);
+  d.querySelector('[data-act="timer-stop"]').click();
+  await waitFor(function () { return w.HIERRO.state.data.activeSession.timer === null; }, 200);
+  check('se puede cerrar el cronómetro', w.HIERRO.state.data.activeSession.timer === null);
+
   // ── Persistencia ──────────────────────────────────────────────────────
   await new Promise(function (res) {
     frame.addEventListener('load', res, { once: true });
@@ -332,6 +456,7 @@ function finish() {
   check('la sesión del usuario persiste tras recargar', !!w.HIERRO.state.account,
     'traza=' + JSON.stringify(w.HIERRO.bootTrace));
   check('el historial persiste tras recargar', w.HIERRO.state.data.sessions.length >= 2, String(w.HIERRO.state.data.sessions.length));
+  check('el perfil completo persiste tras recargar', Math.round(w.HIERRO.state.data.profile.weightKg) === 82, JSON.stringify(w.HIERRO.state.data.profile));
 
   // ── Cambio de unidad ──────────────────────────────────────────────────
   w.location.hash = '#/perfil';
@@ -355,7 +480,7 @@ function finish() {
   d = frame.contentDocument;
   check('el peso se convierte a libras en pantalla', /^180,7/.test(d.querySelector('#pfWeight').value), d.querySelector('#pfWeight').value);
   check('la etiqueta del peso usa la unidad activa', /Peso actual \(lb\)/.test(d.querySelector('#main').textContent));
-  check('el peso se sigue guardando en kilos', Math.round(w.HIERRO.state.data.profile.weightKg) === 82, String(w.HIERRO.state.data.profile.weightKg));
+  check('el peso se sigue guardando en kilos', Math.round(w.HIERRO.state.data.profile.weightKg) === 82, JSON.stringify(w.HIERRO.state.data.profile) + ' | acct=' + JSON.stringify(w.HIERRO.state.account && w.HIERRO.state.account.profile));
 
   // ── Interruptores nuevos del perfil ──────────────────────────────────
   check('el perfil ofrece pantalla encendida y progresión automática',
@@ -546,6 +671,23 @@ function finish() {
   var migrado = w.HIERRO.state.users[0];
   check('y su credencial se actualiza al formato nuevo', !!(migrado && migrado.iterations === 150000 && /^pbkdf2\$/.test(migrado.hash)),
     String(migrado && migrado.hash).slice(0, 24));
+
+  // ── Espejo de seguridad: si la base principal se vacía ────────────────
+  await new Promise(function (res) { w.HIERRO.CORE.store.wipeBase().then(res, res); });
+  await new Promise(function (res) {
+    frame.addEventListener('load', res, { once: true });
+    w.location.reload();
+  });
+  w = frame.contentWindow; d = frame.contentDocument;
+  w.addEventListener('error', function (e) { errors.push(String(e.message)); });
+  await waitFor(function () { return w.HIERRO && w.HIERRO.ready; });
+  await w.HIERRO.ready;
+  await waitFor(function () { return w.HIERRO.state.users.length > 0; }, 300);
+  check('si la base se vacía, la cuenta vuelve desde el espejo', w.HIERRO.state.users.length > 0,
+    'usuarios=' + w.HIERRO.state.users.length);
+  check('y el historial también se recupera',
+    !!(w.HIERRO.state.account && w.HIERRO.state.data && w.HIERRO.state.data.sessions.length > 0),
+    'sesiones=' + (w.HIERRO.state.data ? w.HIERRO.state.data.sessions.length : 'sin datos'));
 
   check('sin errores de JS durante todo el recorrido', errors.length === 0, errors.join(' | '));
   finish();

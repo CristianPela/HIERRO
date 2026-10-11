@@ -77,6 +77,8 @@ function fmtClock(sec) {
   var m = Math.floor(sec / 60), s = sec % 60;
   return m + ':' + String(s).padStart(2, '0');
 }
+/* Igual que fmtClock, pero para mostrar duraciones ("1:30", "12:00"). */
+function fmtSeg(sec) { return fmtClock(sec); }
 function fmtNum(n, dec) {
   if (dec == null) dec = 0;
   return new Intl.NumberFormat('es-AR', { minimumFractionDigits: dec, maximumFractionDigits: dec }).format(n);
@@ -165,6 +167,8 @@ var state = {
   newSessionDate: todayISO(),  // día que se está por entrenar
   calcWeight: 60,              // peso de la calculadora de discos
   picker: { q: '', muscle: '' }, // estado del selector de ejercicios
+  pickerMode: 'grupos',    // 'grupos' = armar el día por grupo muscular | 'rutinas' = rutinas listas
+  gatePanel: 'login',      // 'login' (siempre) | 'alta-admin' (solo primera vez en el dispositivo)
   pendingObjetivo: null,  // elección provisional mientras se crea un usuario
   pendingNivel: null,
   migrated: false,        // la base se migró del formato viejo en esta apertura
@@ -179,6 +183,8 @@ function defaultPrefs() {
     sound: true, vibrate: true, barKg: 20, defaultRest: 90, unit: 'kg',
     wake: true,   // mantener la pantalla encendida mientras hay sesión
     prog: true,   // progresión automática de cargas
+    timerSec: 90, // duración por defecto del cronómetro por ejercicio
+    pickerMode: 'grupos', // cómo se elige el entrenamiento: por grupo muscular o rutinas listas
   };
 }
 
@@ -444,14 +450,21 @@ function crearUsuario(nombre, password, rol, profile) {
   });
 }
 
+/* El perfil físico completo es lo que permite calcular cargas y volúmenes. Un
+   usuario recién dado de alta no lo tiene: después de entrar se lo pide. */
+function perfilCompleto(p) {
+  return !!(p && Number(p.weightKg) > 0 && p.objetivo && p.level);
+}
+
 /* Alta del administrador en un dispositivo sin usuarios: es el único alta que
    puede hacer alguien que todavía no entró, y por eso queda como admin. */
 function altaAdministrador(ev) {
   ev.preventDefault();
   var name = $('#regName').value.trim();
   var pass = $('#regPass').value;
-  var peso = parseFloat(String($('#regWeight').value).replace(',', '.')) || 70;
-  var altura = parseFloat($('#regHeight').value) || 0;
+  var pesoEl = $('#regWeight'), alturaEl = $('#regHeight');
+  var peso = pesoEl ? (parseFloat(String(pesoEl.value).replace(',', '.')) || 0) : 0;
+  var altura = alturaEl ? (parseFloat(alturaEl.value) || 0) : 0;
   var objetivo = state.pendingObjetivo || 'hipertrofia';
   var nivel = state.pendingNivel || 'Principiante';
 
@@ -463,7 +476,8 @@ function altaAdministrador(ev) {
   crearUsuario(name, pass, 'admin', profile).then(function (user) {
     return loadAccount(user.id);
   }).then(function () {
-    go('#/hoy');
+    state.gatePanel = 'login';
+    go(perfilCompleto(state.data.profile) ? '#/hoy' : '#/perfil');
     toast('Administrador creado. Ya podés dar de alta a los demás desde Perfil.', 'sign');
   }).catch(function (e) {
     formError('#regError', 'No se pudo crear el usuario: ' + e.message);
@@ -497,9 +511,11 @@ function login(ev) {
       acc.lastLogin = new Date().toISOString();
       return CORE.store.saveUser(acc);
     }).then(function () { return loadAccount(acc.id); }).then(function () {
-      go('#/hoy');
+      // Si el perfil físico está sin completar, se lo pide antes de entrenar.
+      go(perfilCompleto(state.data.profile) ? '#/hoy' : '#/perfil');
       render();
       if (esVieja) toast('Contraseña actualizada al formato nuevo.', 'sign');
+      else if (!perfilCompleto(state.data.profile)) toast('Completá tu perfil para que las cargas se calculen bien.', 'sign');
     });
   }).catch(function (e) {
     formError('#loginError', 'No se pudo validar el acceso: ' + e.message);
@@ -1021,31 +1037,212 @@ var Rest = {
   },
 };
 
-/* Pulso sonoro + vibración al terminar el descanso. */
-var audioCtx = null;
-function beep() {
-  if (!state.data || !state.data.prefs.sound) return;
-  try {
+/* ═══ 7b. SONIDO, VIBRACIÓN Y AVISOS ══════════════════════════════════════
+   La alarma tiene que escucharse por encima de la música y sentirse en el
+   bolsillo. Los tonos salen por el canal de medios (Web Audio), así que suenan
+   junto con lo que estés escuchando; además vibra y, si la app quedó en
+   segundo plano, aparece un aviso del sistema. El audio necesita un toque del
+   usuario para arrancar: se desbloquea con el primero. */
+
+var Sound = {
+  ctx: null,
+  desbloquear: function () {
+    if (!state.data || !state.data.prefs.sound) return null;
     var AC = window.AudioContext || window.webkitAudioContext;
-    if (!AC) return;
-    audioCtx = audioCtx || new AC();
-    if (audioCtx.state === 'suspended') audioCtx.resume();
-    var t = audioCtx.currentTime;
-    [0, 0.18].forEach(function (offset, i) {
-      var osc = audioCtx.createOscillator(), gain = audioCtx.createGain();
+    if (!AC) return null;
+    if (!Sound.ctx) { try { Sound.ctx = new AC(); } catch (e) { return null; } }
+    if (Sound.ctx.state === 'suspended') { try { Sound.ctx.resume(); } catch (e) {} }
+    return Sound.ctx;
+  },
+  tono: function (freq, dur, espera, vol) {
+    var ctx = Sound.ctx;
+    if (!ctx || !dur) return;
+    try {
+      var t0 = ctx.currentTime + (espera || 0);
+      var osc = ctx.createOscillator(), gain = ctx.createGain();
       osc.type = 'square';
-      osc.frequency.value = i ? 1180 : 880;
-      gain.gain.setValueAtTime(0.0001, t + offset);
-      gain.gain.exponentialRampToValueAtTime(0.22, t + offset + 0.01);
-      gain.gain.exponentialRampToValueAtTime(0.0001, t + offset + 0.14);
-      osc.connect(gain); gain.connect(audioCtx.destination);
-      osc.start(t + offset); osc.stop(t + offset + 0.16);
-    });
-  } catch (e) { /* sin audio: no es crítico */ }
+      osc.frequency.value = freq;
+      osc.connect(gain); gain.connect(ctx.destination);
+      gain.gain.setValueAtTime(0.0001, t0);
+      gain.gain.exponentialRampToValueAtTime(vol || 0.3, t0 + 0.015);
+      gain.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+      osc.start(t0); osc.stop(t0 + dur + 0.03);
+    } catch (e) { /* si el audio falla, quedan la vibración y el aviso */ }
+  },
+  /* Tres ráfagas de dos tonos agudos: se distinguen de la música y de un mensaje. */
+  alarma: function () {
+    Sound.desbloquear();
+    for (var i = 0; i < 3; i++) {
+      Sound.tono(1046, 0.16, i * 0.5, 0.34);
+      Sound.tono(1568, 0.16, i * 0.5 + 0.2, 0.34);
+    }
+  },
+  corto: function () {
+    Sound.desbloquear();
+    Sound.tono(880, 0.12, 0, 0.22);
+    Sound.tono(1180, 0.14, 0.16, 0.22);
+  },
+  prueba: function () {
+    Sound.alarma();
+    toast('Si escuchaste tres ráfagas agudas, la alarma suena bien.', 'sign');
+  },
+};
+
+function vibrar(patron) {
+  if (!state.data || !state.data.prefs.vibrate || !navigator.vibrate) return;
+  try { navigator.vibrate(patron); } catch (e) {}
 }
+
+var Avisos = {
+  soportado: function () { return typeof Notification !== 'undefined'; },
+  permiso: function () { return Avisos.soportado() ? Notification.permission : 'no-soportado'; },
+  pedir: function () {
+    if (!Avisos.soportado()) {
+      toast('Este navegador no permite avisos del sistema. La alarma igual suena.', 'error');
+      return Promise.resolve('no-soportado');
+    }
+    return Notification.requestPermission().then(function (p) {
+      render();
+      toast(p === 'granted'
+        ? 'Avisos activados: te avisa aunque estés en otra app.'
+        : 'Quedaron sin permiso. La alarma igual suena con la app abierta.', p === 'granted' ? 'sign' : 'error');
+      return p;
+    }).catch(function () { return 'error'; });
+  },
+  /* Aviso del sistema al terminar el cronómetro, solo si la app no está a la vista. */
+  fin: function (titulo, cuerpo) {
+    if (!Avisos.soportado() || Avisos.permiso() !== 'granted' || !document.hidden) return;
+    var op = { body: cuerpo, tag: 'hierro-cronometro', renotify: true, requireInteraction: true, vibrate: [400, 150, 400, 150, 600] };
+    try {
+      if (navigator.serviceWorker && navigator.serviceWorker.ready) {
+        navigator.serviceWorker.ready.then(function (reg) {
+          if (reg.showNotification) reg.showNotification(titulo, op);
+        }).catch(function () {});
+      } else {
+        new Notification(titulo, op);
+      }
+    } catch (e) { /* sin aviso del sistema: quedan sonido y vibración */ }
+  },
+};
+
+/* Se desbloquea el audio con el primer gesto: sin eso, los navegadores móviles
+   no dejan sonar nada. */
+['pointerdown', 'touchstart', 'keydown'].forEach(function (ev) {
+  window.addEventListener(ev, function () { Sound.desbloquear(); }, { once: true, passive: true });
+});
+
+/* ── Cronómetro por ejercicio ─────────────────────────────────────────────
+   Se da Start y termina solo. El final se calcula con hora real, no con
+   temporizadores, así que si el teléfono bloquea o cierra la app, al volver el
+   fin se detecta igual y avisa. */
+
+var EjTimer = {
+  _iv: null,
+  datos: function () {
+    var s = state.data && state.data.activeSession;
+    return s ? (s.timer || null) : null;
+  },
+  segundos: function (e) {
+    return clamp(Math.round(Number(e && e.time) || Number(state.data.prefs.timerSec) || 90), 5, 3600);
+  },
+  asignar: function (entryIdx, seg) {
+    var s = state.data && state.data.activeSession;
+    if (!s || !s.entries[entryIdx]) return;
+    s.entries[entryIdx].time = clamp(Math.round(seg), 5, 3600);
+    saveData(); render();
+  },
+  iniciar: function (entryIdx) {
+    var s = state.data && state.data.activeSession;
+    if (!s || !s.entries[entryIdx]) return;
+    var e = s.entries[entryIdx];
+    var total = EjTimer.segundos(e);
+    s.timer = {
+      entryIndex: entryIdx, nombre: e.name, totalSec: total,
+      startedAt: Date.now(), endsAt: Date.now() + total * 1000, running: true, fired: false,
+    };
+    saveData();
+    EjTimer.latir();
+    render();
+    toast('Cronómetro de ' + fmtSeg(total) + ' andando. Al llegar a cero te avisa.', 'sign');
+  },
+  pausar: function () {
+    var t = EjTimer.datos();
+    if (!t || !t.running) return;
+    t.restante = Math.max(0, Math.round((t.endsAt - Date.now()) / 1000));
+    t.running = false;
+    EjTimer.pararLatido();
+    saveData(); render();
+  },
+  reanudar: function () {
+    var t = EjTimer.datos();
+    if (!t) return;
+    var seg = t.restante != null ? t.restante : EjTimer.segundos(state.data.activeSession.entries[t.entryIndex]);
+    t.endsAt = Date.now() + seg * 1000;
+    t.running = true;
+    t.fired = false;
+    saveData();
+    EjTimer.latir();
+    render();
+  },
+  detener: function () {
+    var s = state.data && state.data.activeSession;
+    if (!s) return;
+    s.timer = null;
+    EjTimer.pararLatido();
+    saveData(); render();
+    toast('Cronómetro detenido.');
+  },
+  latir: function () {
+    EjTimer.pararLatido();
+    EjTimer._iv = setInterval(function () { EjTimer.tick(); }, 250);
+    EjTimer.tick();
+  },
+  pararLatido: function () { if (EjTimer._iv) clearInterval(EjTimer._iv); EjTimer._iv = null; },
+  restante: function () {
+    var t = EjTimer.datos();
+    if (!t) return 0;
+    if (!t.running) return t.restante != null ? t.restante : t.totalSec;
+    return Math.max(0, (t.endsAt - Date.now()) / 1000);
+  },
+  tick: function () {
+    var t = EjTimer.datos();
+    if (!t) { EjTimer.pararLatido(); return; }
+    if (t.running && Date.now() >= t.endsAt) { EjTimer.terminar(); return; }
+    // Solo se refrescan los números: no se reconstruye la pantalla cuatro veces por segundo.
+    var caja = document.getElementById('ejtimer');
+    if (caja) caja.textContent = fmtClock(EjTimer.restante());
+    // La banda de abajo también sigue la cuenta cuando no hay descanso corriendo.
+    if (!Rest.running) {
+      var reloj = document.getElementById('clockValue');
+      if (reloj) reloj.textContent = fmtClock(EjTimer.restante());
+    }
+  },
+  terminar: function () {
+    var t = EjTimer.datos();
+    if (!t) return;
+    t.running = false; t.fired = true; t.restante = 0;
+    EjTimer.pararLatido();
+    saveData();
+    Sound.alarma();
+    vibrar([0, 200, 120, 200, 120, 400]);
+    Avisos.fin('¡Fin del ejercicio!', t.nombre + ': llegaste a ' + fmtSeg(t.totalSec) + '.');
+    render();
+    toast('¡FIN! ' + t.nombre + ': ' + fmtSeg(t.totalSec) + '.', 'sign');
+  },
+  /* Al abrir la app: si el reloj pasó mientras estaba cerrada, avisa igual. */
+  recuperar: function () {
+    var t = EjTimer.datos();
+    if (!t) return;
+    if (t.running && Date.now() >= t.endsAt) { EjTimer.terminar(); return; }
+    if (t.running) EjTimer.latir();
+  },
+};
+
+function beep() { Sound.corto(); }
+
 function announceRestOver() {
   beep();
-  if (state.data && state.data.prefs.vibrate && navigator.vibrate) navigator.vibrate([120, 70, 120]);
+  vibrar([120, 70, 120]);
   var next = state.data && state.data.activeSession ? firstPending(state.data.activeSession) : null;
   toast(next ? 'Descanso listo. ' + next.ex.name + ', serie ' + (next.set + 1) + '.' : 'Descanso terminado.', 'sign');
   var band = $('#nextband');
@@ -1089,12 +1286,13 @@ function textoInstalar() {
 }
 
 /* ── 8.1 Acceso ───────────────────────────────────────────────────────────
-   Sin alta propia: los usuarios los crea el administrador. Lo único que se
-   puede hacer desde acá sin credenciales es el alta del administrador en un
-   dispositivo que todavía no tiene ninguno, y aceptar un enlace de alta. */
+   Lo primero que se ve es SIEMPRE el ingreso: usuario y contraseña. El alta del
+   administrador es solo un enlace para la primera vez en un dispositivo, no la
+   pantalla principal. Y también se puede entrar aceptando un enlace de alta. */
 
 function viewGate() {
   var hasUsers = state.users.length > 0;
+  var altaAdmin = state.gatePanel === 'alta-admin';
 
   var band = '<div class="gate__band"><i class="fa-solid fa-dumbbell"></i><span>Tu progreso queda en este dispositivo</span></div>';
   var cabeza = '<div>' +
@@ -1136,8 +1334,11 @@ function viewGate() {
       '</div>' +
       '<p class="alert alert--error" id="loginError" hidden></p>' +
       '<button class="btn btn--sign btn--block" type="submit"><i class="fa-solid fa-arrow-right-to-bracket"></i> Entrar</button>' +
-      '<p class="gate__note">Los usuarios los da de alta el administrador de este dispositivo. ' +
-        'Si te dieron un enlace de alta, abrilo en este navegador.</p>' +
+      '<p class="gate__note">Las cuentas las da de alta el administrador. Si te pasó un enlace de alta, abrilo en este navegador.</p>' +
+      (hasUsers
+        ? ''
+        : '<p class="gate__note">Este dispositivo todavía no tiene ninguna cuenta. ' +
+          '<button type="button" class="link-btn" data-act="gate-alta-admin">Crear la cuenta del administrador</button>.</p>') +
       '<p class="gate__note">Las cuentas y los entrenamientos viven en este dispositivo. No se envían a ningún servidor.</p>' +
     '</form>';
 
@@ -1156,28 +1357,23 @@ function viewGate() {
 
   var altaAdminPanel =
     '<form class="form" data-form="alta-admin">' +
-      '<h2 class="gate__h2">Alta del administrador</h2>' +
-      '<p class="gate__note">Este dispositivo todavía no tiene usuarios. La primera cuenta es la del ' +
-        '<b>administrador</b>: desde ella vas a dar de alta a los demás, con su usuario y su contraseña.</p>' +
+      '<h2 class="gate__h2">Cuenta del administrador</h2>' +
+      '<p class="gate__note">Solo la primera vez en este dispositivo. Después vas a entrar siempre desde la pantalla de ingreso, ' +
+        'y desde esta cuenta vas a dar de alta a los demás.</p>' +
       '<div class="field"><label class="field__label" for="regName">Usuario</label>' +
         '<input class="input" id="regName" autocomplete="username" required></div>' +
       '<div class="field"><label class="field__label" for="regPass">Contraseña</label>' +
         '<input class="input" id="regPass" type="password" autocomplete="new-password" required>' +
         '<span class="field__hint">Mínimo 4 caracteres. Se guarda cifrada con PBKDF2 y sal propia: la contraseña en claro no se almacena.</span></div>' +
-      '<div class="grid-2">' +
-        '<div class="field"><label class="field__label" for="regWeight">Peso (kg)</label>' +
-          '<input class="input" id="regWeight" type="text" inputmode="decimal" value="75"></div>' +
-        '<div class="field"><label class="field__label" for="regHeight">Altura (cm)</label>' +
-          '<input class="input" id="regHeight" type="text" inputmode="numeric" value="175"></div>' +
-      '</div>' +
       '<div class="field"><span class="field__label" id="lblObjetivo">Objetivo principal</span><div class="choice" role="group" aria-labelledby="lblObjetivo">' + objetivos + '</div></div>' +
       '<div class="field"><span class="field__label" id="lblNivel">Experiencia</span><div class="choice" role="group" aria-labelledby="lblNivel">' + niveles + '</div></div>' +
       '<p class="alert alert--error" id="regError" hidden></p>' +
       '<button class="btn btn--sign btn--block" type="submit"><i class="fa-solid fa-user-shield"></i> Crear administrador</button>' +
+      '<button class="btn btn--ghost btn--block" type="button" data-act="gate-alta-admin" data-value="volver">Volver al ingreso</button>' +
     '</form>';
 
   return '<div class="gate">' + cabeza + band +
-    '<div class="gate__panel">' + (hasUsers ? loginPanel : altaAdminPanel) + '</div>' +
+    '<div class="gate__panel">' + (altaAdmin && !hasUsers ? altaAdminPanel : loginPanel) + '</div>' +
     (enModoApp() ? '' : '<div class="alert">' + textoInstalar() + '</div>') +
   '</div>';
 }
@@ -1337,19 +1533,171 @@ function viewTrain() {
   return html;
 }
 
+/* ── Grupos musculares y armado del día ───────────────────────────────────
+   El catálogo se puede mirar y armar por grupo muscular. El orden, los nombres
+   y cuántos ejercicios se sugieren por grupo salen de data/exercises.js. */
+
+function gruposOrden() {
+  var definidos = (DB.meta && DB.meta.grupos) || [];
+  var presentes = [];
+  DB.exercises.forEach(function (ex) { if (presentes.indexOf(ex.muscle) === -1) presentes.push(ex.muscle); });
+  var orden = definidos.filter(function (g) { return presentes.indexOf(g) !== -1; });
+  presentes.forEach(function (g) { if (orden.indexOf(g) === -1) orden.push(g); });
+  return orden;
+}
+function ejerciciosDeGrupo(grupo) {
+  return DB.exercises.filter(function (ex) { return ex.muscle === grupo; });
+}
+function porGrupoSugeridos() { return Number((DB.meta || {}).porGrupo) || 3; }
+
+/* Borrador del día: qué grupos elegiste y con qué ejercicios. Se guarda con el
+   resto de los datos, así no se pierde si cerrás la app mientras lo armás. */
+function borrador() {
+  var d = state.data;
+  if (!d.borrador || typeof d.borrador !== 'object') d.borrador = { grupos: [], ejercicios: [] };
+  if (!Array.isArray(d.borrador.grupos)) d.borrador.grupos = [];
+  if (!Array.isArray(d.borrador.ejercicios)) d.borrador.ejercicios = [];
+  return d.borrador;
+}
+
+/* Elegir un grupo trae sus primeros ejercicios (los principales del grupo) y
+   destildarlo los saca. Después se agrega y se quita uno por uno. */
+function alternarGrupo(grupo) {
+  var b = borrador();
+  var i = b.grupos.indexOf(grupo);
+  if (i === -1) {
+    b.grupos.push(grupo);
+    ejerciciosDeGrupo(grupo).slice(0, porGrupoSugeridos()).forEach(function (ex) {
+      if (b.ejercicios.indexOf(ex.key) === -1) b.ejercicios.push(ex.key);
+    });
+  } else {
+    b.grupos.splice(i, 1);
+    ejerciciosDeGrupo(grupo).forEach(function (ex) {
+      var k = b.ejercicios.indexOf(ex.key);
+      if (k !== -1) b.ejercicios.splice(k, 1);
+    });
+  }
+  saveData(); render();
+}
+
+function alternarEjercicioDelDia(key) {
+  var b = borrador();
+  var i = b.ejercicios.indexOf(key);
+  var ex = exOf(key);
+  if (i === -1) {
+    b.ejercicios.push(key);
+    if (ex && b.grupos.indexOf(ex.muscle) === -1) b.grupos.push(ex.muscle);
+  } else {
+    b.ejercicios.splice(i, 1);
+    // Si ya no queda ninguno de ese grupo, el grupo deja de estar elegido.
+    if (ex && !b.ejercicios.some(function (k) { var e2 = exOf(k); return e2 && e2.muscle === ex.muscle; })) {
+      var g = b.grupos.indexOf(ex.muscle);
+      if (g !== -1) b.grupos.splice(g, 1);
+    }
+  }
+  saveData(); render();
+}
+
+function limpiarBorrador() {
+  state.data.borrador = { grupos: [], ejercicios: [] };
+  saveData(); render();
+  toast('Selección limpia.');
+}
+
+/* Arma la sesión con lo elegido: es el "hoy entreno estos grupos". */
+function empezarDesdeBorrador() {
+  var b = borrador();
+  if (!b.ejercicios.length) { toast('Elegí al menos un ejercicio.'); return; }
+  if (state.data.activeSession && !confirm('Tenés una sesión sin terminar. ¿Empezar una nueva y descartar la anterior?')) return;
+  var fecha = /^\d{4}-\d{2}-\d{2}$/.test(state.newSessionDate) ? state.newSessionDate : todayISO();
+  if (fecha > todayISO()) fecha = todayISO();
+  var nombre = b.grupos.length ? b.grupos.join(' + ') : 'Personalizada';
+  var objetivo = state.data.profile.objetivo;
+  var session = {
+    id: uid(), routineKey: 'armada', routineName: 'Día de ' + nombre, objetivo: objetivo,
+    date: fecha, startedAt: Date.now(), finishedAt: null,
+    entries: b.ejercicios.map(function (k) { return newEntry(k, objetivo); }),
+    armada: { grupos: b.grupos.slice(), ejercicios: b.ejercicios.slice() },
+  };
+  state.data.activeSession = session;
+  state.data.lastRoutine = null;
+  saveData();
+  go('#/entrenar');
+  render();
+  toast(session.entries.length + ' ejercicios listos. ¡A entrenar!', 'sign');
+}
+
+/* Armador del día: elegís grupos y la app propone los ejercicios de esos grupos. */
+function builderHtml() {
+  var b = borrador();
+  var grupos = gruposOrden();
+  var objetivo = state.data.profile.objetivo;
+
+  var chips = grupos.map(function (g) {
+    var elegidos = b.ejercicios.filter(function (k) { var ex = exOf(k); return ex && ex.muscle === g; }).length;
+    return '<button class="chip chip--grupo" data-act="toggle-grupo" data-value="' + esc(g) + '" aria-pressed="' + (b.grupos.indexOf(g) !== -1) + '">' +
+      esc(g) + '<span class="chip__count">' + elegidos + '/' + ejerciciosDeGrupo(g).length + '</span></button>';
+  }).join('');
+
+  var bloques = grupos.filter(function (g) { return b.grupos.indexOf(g) !== -1; }).map(function (g) {
+    var filas = ejerciciosDeGrupo(g).map(function (ex) {
+      var elegido = b.ejercicios.indexOf(ex.key) !== -1;
+      var presc = prescriptionFor(ex.key, { w: routineDefaultWeight(ex.key) }, objetivo);
+      var carga = presc.weight > 0 ? fmtWeight(presc.weight) : (ex.load === 'body' ? 'corporal' : '—');
+      return '<button class="pick' + (elegido ? ' is-on' : '') + '" data-act="toggle-ejercicio" data-ex="' + esc(ex.key) + '" aria-pressed="' + elegido + '">' +
+        '<span class="pick__mark"><i class="fa-solid ' + (elegido ? 'fa-check' : 'fa-plus') + '" aria-hidden="true"></i></span>' +
+        '<span class="pick__text">' +
+          '<span class="pick__name">' + esc(ex.name) + '</span>' +
+          '<span class="pick__meta">' + esc(ex.equipment || '') + ' · ' + (ex.defaultSets || 3) + ' × ' + esc(ex.defaultReps || '10') + '</span>' +
+        '</span>' +
+        '<span class="pick__load">' + esc(carga) + '</span>' +
+      '</button>';
+    }).join('');
+    return '<section class="board"><div class="board__head">' +
+        '<h2 class="board__title">' + esc(g) + '</h2>' +
+        '<span class="board__note">' + ejerciciosDeGrupo(g).length + ' en el catálogo</span>' +
+      '</div>' + filas + '</section>';
+  }).join('');
+
+  var resumen = b.ejercicios.length
+    ? '<div class="builder-bar">' +
+        '<span class="builder-bar__info"><b>' + b.ejercicios.length + '</b> ejercicios · ' + b.grupos.length +
+          ' grupo' + (b.grupos.length === 1 ? '' : 's') + '</span>' +
+        '<button class="btn btn--sign" data-act="start-builder"><i class="fa-solid fa-play" aria-hidden="true"></i> Empezar</button>' +
+      '</div>'
+    : '';
+
+  return '<div class="filters filters--grupos">' + chips + '</div>' +
+    (b.grupos.length
+      ? bloques
+      : '<div class="alert">Elegí uno o más <b>grupos musculares</b> y la app te arma el día con los ejercicios de esos grupos. ' +
+        'Después sacás y agregás los que quieras: la lista es tuya.</div>') +
+    (b.ejercicios.length
+      ? '<div class="rows" style="margin-top:12px"><button class="row-link" data-act="clear-builder">' +
+          '<span class="row-link__icon"><i class="fa-solid fa-eraser" aria-hidden="true"></i></span>' +
+          '<span class="row-link__text"><span class="row-link__name">Limpiar la selección</span>' +
+          '<span class="row-link__desc">Volver a empezar con los grupos</span></span></button></div>'
+      : '') +
+    resumen;
+}
+
 function routinePicker() {
-  var todas = state.filter === 'todas';
-  var obj = todas ? '' : (state.filter || state.data.profile.objetivo);
-  var chips = Object.keys(RT.objetivos).map(function (o) {
-    return '<button class="chip" data-act="filter" data-value="' + o + '" aria-pressed="' + (!todas && obj === o) + '">' + esc(RT.objetivos[o].label) + '</button>';
-  }).join('') + '<button class="chip" data-act="filter" data-value="" aria-pressed="' + todas + '">Todas</button>';
+  // Se recuerda cómo elegiste la última vez: si armás por grupo muscular, seguís ahí.
+  var modo = (state.pickerMode || state.data.prefs.pickerMode) === 'rutinas' ? 'rutinas' : 'grupos';
 
-  var list = routinesFor(obj).map(function (r) { return routineCard(r, false); }).join('');
-
-  return '<div class="view__head"><div>' +
-      '<h1 class="view__title">Elegí tu rutina</h1>' +
-      '<p class="view__sub">' + esc((RT.objetivos[obj] && RT.objetivos[obj].desc) || 'Todas las rutinas disponibles, ordenadas por objetivo y nivel.') + '</p>' +
+  var head = '<div class="view__head"><div>' +
+      '<h1 class="view__title">' + (modo === 'grupos' ? 'Armá tu día' : 'Elegí tu rutina') + '</h1>' +
+      '<p class="view__sub">' + (modo === 'grupos'
+        ? 'Elegí qué grupos musculares entrenás hoy: la app te arma la lista con sus ejercicios.'
+        : 'Rutinas ya armadas, ordenadas por objetivo y nivel.') + '</p>' +
     '</div></div>' +
+
+    '<div class="filters" style="margin-bottom:10px">' +
+      '<button class="chip" data-act="picker-mode" data-value="grupos" aria-pressed="' + (modo === 'grupos') + '">' +
+        '<i class="fa-solid fa-layer-group" aria-hidden="true"></i> Por grupo muscular</button>' +
+      '<button class="chip" data-act="picker-mode" data-value="rutinas" aria-pressed="' + (modo === 'rutinas') + '">' +
+        '<i class="fa-solid fa-list-check" aria-hidden="true"></i> Rutinas listas</button>' +
+    '</div>' +
 
     /* El día se elige: podés registrar el entrenamiento de ayer sin inventar nada. */
     '<div class="datebar">' +
@@ -1362,9 +1710,75 @@ function routinePicker() {
         '<button class="chip" data-act="set-date" data-value="' + isoDaysAgo(1) + '" aria-pressed="' + (state.newSessionDate === isoDaysAgo(1)) + '">Ayer</button>' +
         '<button class="chip" data-act="set-date" data-value="' + isoDaysAgo(2) + '" aria-pressed="' + (state.newSessionDate === isoDaysAgo(2)) + '">Anteayer</button>' +
       '</div>' +
-    '</div>' +
+    '</div>';
 
-    '<div class="filters">' + chips + '</div>' + list;
+  if (modo === 'grupos') return head + builderHtml();
+
+  var todas = state.filter === 'todas';
+  var obj = todas ? '' : (state.filter || state.data.profile.objetivo);
+  var chips = Object.keys(RT.objetivos).map(function (o) {
+    return '<button class="chip" data-act="filter" data-value="' + o + '" aria-pressed="' + (!todas && obj === o) + '">' + esc(RT.objetivos[o].label) + '</button>';
+  }).join('') + '<button class="chip" data-act="filter" data-value="" aria-pressed="' + todas + '">Todas</button>';
+  var list = routinesFor(obj).map(function (r) { return routineCard(r, false); }).join('');
+
+  return head +
+    '<div class="filters">' + chips + '</div>' +
+    '<p class="view__sub" style="margin:-2px 0 12px">' + esc((RT.objetivos[obj] && RT.objetivos[obj].desc) || 'Todas las rutinas disponibles.') + '</p>' +
+    list;
+}
+
+/* Cronómetro del ejercicio, dentro de la tarjeta. Se da Start y termina solo:
+   al llegar a cero suena, vibra y avisa. */
+function timerHtml(e, i) {
+  var t = EjTimer.datos();
+  var mio = !!t && t.entryIndex === i;
+  var corriendo = mio && t.running;
+  var pausado = mio && !t.running && !t.fired;
+  var terminado = mio && t.fired;
+  var configurado = mio ? t.totalSec : EjTimer.segundos(e);
+  var mostrar = corriendo ? EjTimer.restante() : (mio && t.restante != null ? t.restante : configurado);
+
+  var cabeza = '<div class="ejtimer__head">' +
+    '<span class="ejtimer__label"><i class="fa-solid fa-stopwatch" aria-hidden="true"></i> Cronómetro</span>' +
+    ((corriendo || pausado || terminado)
+      ? '<span class="ejtimer__time' + (terminado ? ' is-fin' : '') + '" id="ejtimer">' + (terminado ? 'FIN' : fmtClock(mostrar)) + '</span>'
+      : '<span class="ejtimer__conf">' + fmtSeg(configurado) + '</span>') +
+  '</div>';
+
+  var cuerpo;
+  if (corriendo) {
+    cuerpo = '<div class="ejtimer__actions">' +
+      '<button class="btn btn--sm btn--ghost" data-act="timer-pause" data-entry="' + i + '">' +
+        '<i class="fa-solid fa-pause" aria-hidden="true"></i> Pausar</button>' +
+      '<button class="btn btn--sm btn--ghost" data-act="timer-stop" data-entry="' + i + '">Detener</button>' +
+    '</div>';
+  } else if (pausado) {
+    cuerpo = '<div class="ejtimer__actions">' +
+      '<button class="btn btn--sm btn--sign" data-act="timer-resume" data-entry="' + i + '">' +
+        '<i class="fa-solid fa-play" aria-hidden="true"></i> Seguir</button>' +
+      '<button class="btn btn--sm btn--ghost" data-act="timer-stop" data-entry="' + i + '">Detener</button>' +
+    '</div>';
+  } else if (terminado) {
+    cuerpo = '<p class="ejtimer__fin">Listo: ' + esc(t.nombre) + ' llegó a ' + fmtSeg(t.totalSec) + '.</p>' +
+      '<div class="ejtimer__actions">' +
+      '<button class="btn btn--sm btn--sign" data-act="timer-restart" data-entry="' + i + '">' +
+        '<i class="fa-solid fa-rotate-right" aria-hidden="true"></i> Otra vez</button>' +
+      '<button class="btn btn--sm btn--ghost" data-act="timer-stop" data-entry="' + i + '">Cerrar</button>' +
+    '</div>';
+  } else {
+    var opciones = [30, 60, 90, 120, 300].map(function (s) {
+      return '<button class="chip chip--mini" data-act="timer-set" data-entry="' + i + '" data-seg="' + s + '" aria-pressed="' + (configurado === s) + '">' +
+        fmtSeg(s) + '</button>';
+    }).join('');
+    cuerpo = '<div class="ejtimer__chips">' + opciones +
+        '<input class="input input--mini" data-act="timer-libre" data-entry="' + i + '" inputmode="numeric" ' +
+          'placeholder="seg" aria-label="Segundos del cronómetro de ' + esc(e.name) + '">' +
+      '</div>' +
+      '<button class="btn btn--block" data-act="timer-start" data-entry="' + i + '">' +
+        '<i class="fa-solid fa-play" aria-hidden="true"></i> Start ' + fmtSeg(configurado) + '</button>';
+  }
+
+  return '<div class="ejtimer' + (corriendo ? ' is-on' : '') + (terminado ? ' is-done' : '') + '">' + cabeza + cuerpo + '</div>';
 }
 
 function unitCard(e, i) {
@@ -1397,6 +1811,7 @@ function unitCard(e, i) {
       '</div>' +
     '</div>' +
     (e.presc && e.presc.why ? '<p class="unit__presc"><i class="fa-solid fa-arrow-trend-up" aria-hidden="true"></i> ' + esc(e.presc.why) + '</p>' : '') +
+    timerHtml(e, i) +
     '<div class="sets">' + rows + '</div>' +
     '<div class="unit__foot">' +
       '<button class="btn btn--sm btn--ghost" data-act="del-exercise" data-entry="' + i + '">' +
@@ -1707,6 +2122,13 @@ function viewProfile() {
   return '<div class="view__head"><div><h1 class="view__title">Perfil</h1>' +
     '<p class="view__sub">' + esc(state.account.name) + ' · ' + d.sessions.length + ' sesiones registradas</p></div></div>' +
 
+    /* Un usuario recién dado de alta entra sin perfil físico: sin peso y sin
+       objetivo no se pueden calcular cargas ni volúmenes. */
+    (perfilCompleto(p) ? '' :
+      '<div class="alert alert--sign"><b>Completá tu perfil.</b> Cargá tu peso, tu altura, tu objetivo y tu experiencia. ' +
+      'Con eso la app calcula las cargas sugeridas, el volumen y la recuperación de cada músculo.' +
+      (p.name ? '' : ' Usuario: <b>' + esc(state.account.name) + '</b>.') + '</div>') +
+
     '<div class="form">' +
       '<div class="grid-2">' +
         '<div class="field"><label class="field__label" for="pfWeight">Peso actual (' + unit() + ')</label>' +
@@ -1729,12 +2151,28 @@ function viewProfile() {
       '</div>' +
       '<div class="field"><label class="field__label" for="pfRest">Descanso por defecto (segundos)</label>' +
         '<input class="input" id="pfRest" inputmode="numeric" value="' + prefs.defaultRest + '"></div>' +
+      '<div class="field"><span class="field__label">Duración del cronómetro por defecto</span>' +
+        '<div class="filters" style="margin:0">' +
+          [30, 60, 90, 120, 180].map(function (s) {
+            return '<button class="chip chip--mini" data-act="timer-def" data-seg="' + s + '" aria-pressed="' + (prefs.timerSec === s) + '">' + fmtSeg(s) + '</button>';
+          }).join('') +
+        '</div>' +
+        '<span class="field__hint">Es con lo que arranca el cronómetro de cada ejercicio. En la tarjeta lo podés cambiar por ejercicio.</span></div>' +
       '<div class="filters" style="margin:0">' +
         '<button class="chip" data-act="toggle-sound" aria-pressed="' + prefs.sound + '">Aviso sonoro</button>' +
         '<button class="chip" data-act="toggle-vibrate" aria-pressed="' + prefs.vibrate + '">Vibración</button>' +
         '<button class="chip" data-act="toggle-wake" aria-pressed="' + prefs.wake + '">Pantalla encendida</button>' +
         '<button class="chip" data-act="toggle-prog" aria-pressed="' + prefs.prog + '">Progresión automática</button>' +
       '</div>' +
+      '<div class="filters" style="margin:10px 0 0">' +
+        '<button class="chip" data-act="sound-test"><i class="fa-solid fa-volume-high" aria-hidden="true"></i> Probar la alarma</button>' +
+        '<button class="chip" data-act="avisos-pedir" aria-pressed="' + (Avisos.permiso() === 'granted') + '">' +
+          (Avisos.permiso() === 'granted' ? '<i class="fa-solid fa-bell" aria-hidden="true"></i> Avisos activados'
+            : '<i class="fa-solid fa-bell-slash" aria-hidden="true"></i> Activar avisos') + '</button>' +
+      '</div>' +
+      '<p class="field__hint">El cronómetro de cada ejercicio suena, vibra y avisa cuando llega a cero. ' +
+        'Probá la alarma con la música puesta, antes de confiar en ella. En iPhone, si el teléfono está en silencio, ' +
+        'el sonido puede no salir: la vibración y el aviso igual funcionan.</p>' +
       '<p class="field__hint">La progresión automática deriva el peso de cada ejercicio de tu historial: ' +
         'con el objetivo de fuerza sube cuando completás todas las series, y en el resto primero trepa repeticiones.</p>' +
     '</div></div>' +
@@ -1943,13 +2381,24 @@ function updateBand() {
   }
 
   var resting = Rest.running;
-  clock.hidden = !resting;
+  var t = EjTimer.datos();
+  var corriendoEj = !!(t && t.running);
+  clock.hidden = !(resting || corriendoEj);
   progress.hidden = !resting;
   addBtn.hidden = !resting;
   skipBtn.hidden = !resting;
   if (resting) {
     $('#clockValue').textContent = fmtClock((Rest.endsAt - Date.now()) / 1000);
     progress.firstElementChild.style.transform = 'scaleX(' + clamp((Rest.endsAt - Date.now()) / 1000 / Rest.total, 0, 1) + ')';
+    var lblR = $('#clockLabel');
+    if (lblR) lblR.textContent = 'descanso';
+  } else if (corriendoEj) {
+    title.textContent = 'Cronómetro · ' + t.nombre;
+    sub.textContent = 'Llegó a ' + fmtSeg(t.totalSec) + ' y te avisa. Se pausa y detiene desde la tarjeta del ejercicio.';
+    icon.innerHTML = '<i class="fa-solid fa-stopwatch"></i>';
+    $('#clockValue').textContent = fmtClock(EjTimer.restante());
+    var lblT = $('#clockLabel');
+    if (lblT) lblT.textContent = 'cronómetro';
   }
 }
 
@@ -2025,6 +2474,40 @@ document.addEventListener('click', function (ev) {
       break;
     case 'del-exercise': removeExerciseFromSession(entryIdx); break;
     case 'equalize': applyFirstSetToAll(entryIdx); break;
+
+    /* Acceso: el alta del administrador es un enlace, no la pantalla principal. */
+    case 'gate-alta-admin':
+      state.gatePanel = el.getAttribute('data-value') === 'volver' ? 'login' : 'alta-admin';
+      render();
+      break;
+
+    /* Armado del día por grupo muscular */
+    case 'picker-mode':
+      state.pickerMode = el.getAttribute('data-value') === 'rutinas' ? 'rutinas' : 'grupos';
+      state.data.prefs.pickerMode = state.pickerMode;
+      saveData();
+      render();
+      break;
+    case 'toggle-grupo': alternarGrupo(el.getAttribute('data-value')); break;
+    case 'toggle-ejercicio': alternarEjercicioDelDia(el.getAttribute('data-ex')); break;
+    case 'clear-builder': limpiarBorrador(); break;
+    case 'start-builder': empezarDesdeBorrador(); break;
+
+    /* Cronómetro por ejercicio */
+    case 'timer-set': EjTimer.asignar(entryIdx, Number(el.getAttribute('data-seg'))); break;
+    case 'timer-start': case 'timer-restart': EjTimer.iniciar(entryIdx); break;
+    case 'timer-pause': EjTimer.pausar(); break;
+    case 'timer-resume': EjTimer.reanudar(); break;
+    case 'timer-stop': EjTimer.detener(); break;
+
+    /* Sonido, avisos y duración por defecto */
+    case 'sound-test': Sound.prueba(); break;
+    case 'avisos-pedir': Avisos.pedir(); break;
+    case 'timer-def':
+      state.data.prefs.timerSec = clamp(Number(el.getAttribute('data-seg')) || 90, 5, 3600);
+      saveData(); render();
+      toast('Duración por defecto: ' + fmtSeg(state.data.prefs.timerSec) + '.', 'sign');
+      break;
 
     case 'finish': finishSession(); break;
     case 'discard': discardSession(); break;
@@ -2233,6 +2716,7 @@ document.addEventListener('change', function (ev) {
     saveData();
     refreshLive();
   } else if (el.id === 'pfUnit' || el.id === 'pfBar' || el.id === 'pfRest' || el.id === 'pfWeight' || el.id === 'pfHeight') {
+    var incompletoAntes = !perfilCompleto(state.data.profile);
     if (el.id === 'pfUnit') state.data.prefs.unit = el.value;
     if (el.id === 'pfBar') state.data.prefs.barKg = clamp(parseFloat(el.value) || 20, 5, 30);
     if (el.id === 'pfRest') state.data.prefs.defaultRest = clamp(parseInt(el.value, 10) || 90, 15, 600);
@@ -2242,7 +2726,8 @@ document.addEventListener('change', function (ev) {
     }
     if (el.id === 'pfHeight') state.data.profile.heightCm = parseFloat(el.value) || 0;
     saveData();
-    if (el.id === 'pfUnit') render();
+    // Al completar los datos físicos, el aviso "Completá tu perfil" tiene que irse.
+    if (el.id === 'pfUnit' || (incompletoAntes && perfilCompleto(state.data.profile))) render();
     else toast('Perfil actualizado.');
   }
 });
@@ -2263,6 +2748,15 @@ document.addEventListener('input', function (ev) {
     state.calcWeight = isNaN(vCalc) ? 0 : toKg(vCalc);
     var caja = $('#calcPlates');
     if (caja) caja.innerHTML = platesBlockHtml(state.calcWeight);
+    return;
+  }
+  // Cronómetro: si escribís los segundos a mano, se toma ese valor.
+  if (act === 'timer-libre') {
+    var segLibre = parseInt(String(el.value).replace(/[^0-9]/g, ''), 10);
+    if (!isNaN(segLibre) && segLibre >= 5) {
+      EjTimer.asignar(+el.getAttribute('data-entry'), segLibre);
+      toast('Cronómetro en ' + fmtSeg(segLibre) + '.', 'sign');
+    }
     return;
   }
   if (act !== 'w-input') return;
@@ -2738,6 +3232,9 @@ function boot() {
     if (state.data && state.data.activeSession) {
       var p = firstPending(state.data.activeSession);
       if (p) updateBand();
+      // Si el cronómetro de un ejercicio terminó mientras la app estaba cerrada,
+      // al volver avisa igual.
+      EjTimer.recuperar();
     }
     readyResolve(true);
   }).catch(function (e) {

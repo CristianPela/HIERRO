@@ -15,6 +15,8 @@ GitHub Pages.
 
 ## 0. Qué hace
 
+- **Armá tu día por grupo muscular**: elegís qué grupos entrenás (pecho, espalda, hombros, bíceps, tríceps, cuádriceps, isquios, glúteos, gemelos, core) y la app te arma la lista con sus ejercicios y la carga sugerida de cada uno. Después sacás y agregás los que quieras. Las **rutinas listas** siguen estando, en su propia solapa, separadas por objetivo.
+- **Cronómetro por ejercicio con final automático**: le das Start y termina solo. Al llegar a cero suena (tres ráfagas agudas que se escuchan por encima de la música), vibra y, si la app quedó en segundo plano, aparece un aviso del sistema. La duración se elige por ejercicio (30 s a 5 min, o los segundos que quieras) y hay una por defecto. El final se calcula con hora real: si el teléfono cierra la app, al volver te avisa igual.
 - **Usuarios con alta del administrador**: no hay registro libre. La primera cuenta de un dispositivo es el administrador, y desde ahí se dan de alta los demás con usuario y contraseña. Las contraseñas se guardan derivadas con **PBKDF2-SHA256 (150.000 iteraciones + sal por usuario)**: la contraseña en claro nunca se almacena. El administrador gestiona altas, bajas, restablecimientos y puede desactivar usuarios; **no puede leer los entrenamientos de nadie**.
 - **Datos**: se guardan en **IndexedDB** (con respaldo automático diario incluido), más exportar/importar JSON completo y **CSV** del historial. Migración automática y reversible desde el formato anterior, sin borrar el respaldo viejo.
 - **Rutinas por objetivo** (hipertrofia, fuerza, definición, resistencia) y **elegís cuántos ejercicios hacés**: la rutina es el punto de partida, no un contrato. Podés sumar cualquier ejercicio del catálogo (72) con buscador y filtro por músculo, y quitar los que no vayas a hacer.
@@ -30,10 +32,13 @@ GitHub Pages.
 **No hay registro libre.** Nadie puede crearse una cuenta solo: los usuarios los da de alta el
 administrador, con su usuario y su contraseña.
 
-- **Primera vez en un dispositivo**: la app pide el **alta del administrador** (usuario, contraseña,
-  peso, altura, objetivo y experiencia). Es la única cuenta que se crea sin que exista otra.
-- **Después**: la pantalla de acceso solo permite entrar. Si alguien no tiene usuario, el aviso dice
-  que se lo tiene que dar el administrador.
+- **Lo primero que aparece es el ingreso** (usuario y contraseña). El alta del administrador **no** es
+  la pantalla principal: es un enlace chico abajo, solo para la primera vez en un dispositivo.
+- **Primera vez en un dispositivo**: tocás ese enlace, ponés usuario, contraseña, objetivo y
+  experiencia. Es la única cuenta que se crea sin que exista otra.
+- **Después de entrar**: si a esa cuenta le falta el perfil físico (peso, altura, objetivo,
+  experiencia), la app te lleva a Perfil para completarlo. Sin esos datos no puede calcular cargas,
+  volumen ni recuperación.
 - **Perfil → Usuarios** (solo el administrador): dar de alta, restablecer contraseña, activar o
   desactivar, borrar y **generar el enlace de alta**.
 - **Enlace de alta**: para que alguien use la app en su propio teléfono, el administrador genera un
@@ -45,6 +50,9 @@ administrador, con su usuario y su contraseña.
 - **Cómo se guardan las contraseñas**: PBKDF2-SHA256 con 150.000 iteraciones y una sal distinta por
   usuario. La contraseña en claro no se guarda ni se transmite nunca. Las cuentas del formato
   anterior se actualizan solas a este esquema la primera vez que entran.
+- **Si el navegador vacía su base** (modo privado, limpieza, permisos), la app **se recupera sola desde
+  un espejo de seguridad**: las cuentas, la sesión y tu historial se reponen al abrir. Nunca te quedás
+  sin poder entrar.
 
 ## 0.c Datos, respaldos y formatos
 
