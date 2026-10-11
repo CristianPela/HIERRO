@@ -731,6 +731,50 @@ async function modoRutinas() {
     'main=' + (d.querySelector('#main') ? d.querySelector('#main').textContent.slice(0, 150) : 'sin main') +
     ' | panel=' + w.HIERRO.state.gatePanel);
 
+  // ── Pasar TODO al dispositivo desde la pantalla de acceso ─────────────
+  // Escenario real: celular recién instalado, con el respaldo del navegador.
+  var respaldo = {
+    app: 'hierro', kind: 'respaldo-completo', schema: 2, exportedAt: new Date().toISOString(),
+    users: [{
+      id: 'u-rescate', name: 'Rescatado', role: 'admin', salt: 'sal', hash: 'hash', iterations: 0,
+      createdAt: 1700000000000, disabled: false,
+      profile: { name: 'Rescatado', weightKg: 80, heightCm: 175, objetivo: 'fuerza', level: 'Intermedio' },
+    }],
+    documents: [{
+      userId: 'u-rescate', schema: 2, savedAt: 1700000000000,
+      profile: { name: 'Rescatado', weightKg: 80, heightCm: 175, objetivo: 'fuerza', level: 'Intermedio' },
+      prefs: { unit: 'kg', barKg: 20, defaultRest: 90, timerSec: 90 },
+      sessions: [
+        { id: 'resc-1', date: '2026-02-02', routineName: 'Empuje', objetivo: 'fuerza', startedAt: 1, finishedAt: 2, entries: [] },
+        { id: 'resc-2', date: '2026-02-05', routineName: 'Tirón', objetivo: 'fuerza', startedAt: 3, finishedAt: 4, entries: [] },
+      ],
+      prs: {}, bodyweight: [], activeSession: null, lastRoutine: null, customExercises: [],
+      borrador: { grupos: [], ejercicios: [] },
+    }],
+  };
+  d = frame.contentDocument;
+  check('el acceso ofrece pasar todo desde un respaldo', !!d.querySelector('[data-act="gate-restaurar"]'));
+  d.querySelector('[data-act="gate-restaurar"]').click();
+  await waitFor(function () { return !!d.querySelector('#restaurarArchivo'); }, 200);
+  d = frame.contentDocument;
+  var archivo = new w.File([JSON.stringify(respaldo)], 'respaldo.json', { type: 'application/json' });
+  var dt = new w.DataTransfer();
+  dt.items.add(archivo);
+  var campoArchivo = d.querySelector('#restaurarArchivo');
+  campoArchivo.files = dt.files;
+  campoArchivo.dispatchEvent(new w.Event('change', { bubbles: true }));
+  d.querySelector('form[data-form="restaurar"]').requestSubmit();
+  await waitFor(function () { return w.HIERRO.usuarios.porNombre('Rescatado'); }, 600);
+  check('el respaldo completo entra desde la pantalla de acceso',
+    !!w.HIERRO.usuarios.porNombre('Rescatado'), 'usuarios=' + w.HIERRO.state.users.length);
+  var docRescate = await new Promise(function (res) {
+    w.HIERRO.CORE.store.document('u-rescate').then(res, function () { res(null); });
+  });
+  check('y trae el historial completo', !!(docRescate && docRescate.sessions.length === 2),
+    docRescate ? String(docRescate.sessions.length) : 'sin documento');
+  check('y deja el ingreso preparado con el usuario del respaldo',
+    (d.querySelector('#loginUser') || {}).value === 'Rescatado', (d.querySelector('#loginUser') || {}).value);
+
   check('sin errores de JS durante todo el recorrido', errors.length === 0, errors.join(' | '));
   finish();
 })().catch(function (e) {

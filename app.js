@@ -582,6 +582,43 @@ function traerCuenta(ev) {
   });
 }
 
+/* Trae a este dispositivo TODO lo de otro navegador o teléfono: cuentas y
+   entrenamientos. Es la forma de unificar los dos lados sin servidor. */
+function restaurarEnDispositivo(ev) {
+  ev.preventDefault();
+  var inp = $('#restaurarArchivo');
+  var file = inp && inp.files && inp.files[0];
+  if (!file) return formError('#restaurarError', 'Elegí el archivo del respaldo (el .json que exportaste).');
+  var reader = new FileReader();
+  reader.onload = function () {
+    var data;
+    try { data = JSON.parse(String(reader.result)); } catch (e) {
+      return formError('#restaurarError', 'Ese archivo no es un JSON válido.');
+    }
+    if (data && Array.isArray(data.sessions)) {
+      return formError('#restaurarError', 'Ese es el archivo de UN usuario. Para unificar dispositivos necesitás el «Respaldo completo del dispositivo».');
+    }
+    if (!data || !Array.isArray(data.users) || !data.users.length) {
+      return formError('#restaurarError', 'Ese archivo no es un respaldo de HIERRO.');
+    }
+    CORE.store.restoreFullBackup(data).then(function () {
+      return CORE.store.users();
+    }).then(function (users) {
+      state.users = users;
+      state.gatePanel = 'login';
+      render();
+      var principal = users.filter(function (u) { return u.role === 'admin' && !u.disabled; })[0] || users[0];
+      var campo = $('#loginUser');
+      if (campo && principal) campo.value = principal.name;
+      toast('Listo: ' + users.length + ' cuenta(s) y sus entrenamientos quedaron acá. Entrá con tu contraseña.', 'sign');
+    }).catch(function (e) {
+      formError('#restaurarError', 'No se pudo restaurar: ' + e.message);
+    });
+  };
+  reader.onerror = function () { formError('#restaurarError', 'No se pudo leer el archivo.'); };
+  reader.readAsText(file);
+}
+
 /* Deja el dispositivo en cero: cuentas y entrenamientos de acá. */
 function borrarDispositivo(ev) {
   ev.preventDefault();
@@ -1400,6 +1437,21 @@ function viewGate() {
       '<button class="btn btn--ghost btn--block" type="button" data-act="gate-reset" data-value="volver">Cancelar</button>' +
     '</form>';
 
+  /* Pasar TODO (cuentas + entrenamientos) desde otro navegador o teléfono.
+     Es la forma de unificar los dos lados sin servidor: un archivo y listo. */
+  var restaurarPanel =
+    '<form class="form" data-form="restaurar">' +
+      '<h2 class="gate__h2">Tengo un respaldo</h2>' +
+      '<p class="gate__note">Si en otro navegador o teléfono ya usabas HIERRO, pasá <b>todo</b> acá: ' +
+        'las cuentas y los entrenamientos. Elegí el archivo de <b>Respaldo completo del dispositivo</b>.</p>' +
+      '<div class="field"><label class="field__label" for="restaurarArchivo">Archivo del respaldo (.json)</label>' +
+        '<input class="input" id="restaurarArchivo" type="file" accept=".json,application/json"></div>' +
+      '<p class="alert alert--error" id="restaurarError" hidden></p>' +
+      '<button class="btn btn--sign btn--block" type="submit"><i class="fa-solid fa-upload"></i> Traer todo a este dispositivo</button>' +
+      '<button class="btn btn--ghost btn--block" type="button" data-act="gate-restaurar" data-value="volver">Volver al ingreso</button>' +
+      '<p class="gate__note">Después entrás con tu usuario y tu contraseña de siempre: el respaldo no las cambia.</p>' +
+    '</form>';
+
   var loginPanel =
     '<form class="form" data-form="login" id="panelLogin">' +
       '<h2 class="gate__h2">Entrar</h2>' +
@@ -1458,17 +1510,22 @@ function viewGate() {
 
   var panel = loginPanel;
   if (state.gatePanel === 'traer') panel = traerPanel;
+  else if (state.gatePanel === 'restaurar') panel = restaurarPanel;
   else if (state.gatePanel === 'reset') panel = resetPanel;
   else if (altaAdmin && !hasUsers) panel = altaAdminPanel;
 
   return '<div class="gate">' + cabeza + band +
     '<div class="gate__panel">' + panel + '</div>' +
-    '<p class="gate__note" style="text-align:center">' +
-      (state.gatePanel === 'login'
-        ? '<button type="button" class="link-btn" data-act="gate-traer">Traer mi cuenta de otro navegador</button> · ' +
-          '<button type="button" class="link-btn" data-act="gate-reset">Empezar de cero en este dispositivo</button>'
-        : '') +
-    '</p>' +
+    (state.gatePanel === 'login'
+      ? '<div class="gate__links">' +
+          '<button type="button" class="link-btn" data-act="gate-restaurar">' +
+            '<i class="fa-solid fa-upload" aria-hidden="true"></i> Tengo un respaldo: pasar todo</button>' +
+          '<button type="button" class="link-btn" data-act="gate-traer">' +
+            '<i class="fa-solid fa-download" aria-hidden="true"></i> Traer mi cuenta</button>' +
+          '<button type="button" class="link-btn" data-act="gate-reset">' +
+            '<i class="fa-solid fa-eraser" aria-hidden="true"></i> Empezar de cero</button>' +
+        '</div>'
+      : '') +
     (enModoApp() ? '' : '<div class="alert">' + textoInstalar() + '</div>') +
   '</div>';
 }
@@ -2288,6 +2345,22 @@ function viewProfile() {
       '<div class="plateload" id="calcPlates" style="margin-top:12px">' + platesBlockHtml(state.calcWeight) + '</div>' +
     '</div>' +
 
+    '<div class="section"><div class="section__head"><h2 class="section__title">Pasar todo a otro dispositivo</h2>' +
+      '<span class="section__note">celular, tablet u otro navegador</span></div>' +
+      '<ol class="pasos">' +
+        '<li>Acá: tocá <b>Respaldo completo del dispositivo</b> y guardá el archivo (queda en Descargas o Archivos).</li>' +
+        '<li>Abrí HIERRO en el otro dispositivo, en la pantalla de acceso.</li>' +
+        '<li>Tocá <b>Tengo un respaldo</b>, elegí ese archivo, y listo: cuentas y entrenamientos quedan ahí.</li>' +
+      '</ol>' +
+      '<p class="field__hint">La app instalada en el celular guarda sus datos aparte del navegador: este respaldo es la forma ' +
+        'de unificar los dos lados. Después elegí <b>uno solo</b> como principal, así no se te vuelven a separar.</p>' +
+      '<div class="rows">' +
+        '<button class="row-link" data-act="backup-full"><span class="row-link__icon"><i class="fa-solid fa-box-archive"></i></span>' +
+          '<span class="row-link__text"><span class="row-link__name">Respaldo completo del dispositivo</span>' +
+          '<span class="row-link__desc">Todos los usuarios y todos los historiales, en un solo archivo</span></span></button>' +
+      '</div>' +
+    '</div>' +
+
     (esAdmin() ? usuariosAdminHtml() : '') +
 
     '<div class="section"><div class="section__head"><h2 class="section__title">Datos</h2><span class="section__note">todo queda en este navegador</span></div>' +
@@ -2579,6 +2652,10 @@ document.addEventListener('click', function (ev) {
       break;
     case 'gate-traer':
       state.gatePanel = el.getAttribute('data-value') === 'volver' ? 'login' : 'traer';
+      render();
+      break;
+    case 'gate-restaurar':
+      state.gatePanel = el.getAttribute('data-value') === 'volver' ? 'login' : 'restaurar';
       render();
       break;
     case 'gate-reset':
@@ -3036,6 +3113,7 @@ document.addEventListener('submit', function (ev) {
   if (form === 'alta-admin') altaAdministrador(ev);
   else if (form === 'login') login(ev);
   else if (form === 'traer') traerCuenta(ev);
+  else if (form === 'restaurar') restaurarEnDispositivo(ev);
   else if (form === 'reset-dispositivo') borrarDispositivo(ev);
   else if (form === 'password') changePassword(ev);
   else if (form === 'nuevo-usuario') altaDeUsuario(ev);

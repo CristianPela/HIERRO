@@ -366,6 +366,18 @@ main { display: block; }
 .datebar .field { gap: 5px; }
 .datebar .gate__note { margin: 0; }
 
+/* Acceso: opciones de rescate (traer cuenta, pasar todo, empezar de cero). */
+.gate__links {
+  display: flex; flex-wrap: wrap; gap: 8px 16px; justify-content: center;
+  margin-top: 16px;
+}
+.gate__links .link-btn { display: inline-flex; align-items: center; gap: 7px; }
+
+/* Pasos numerados para tareas que se hacen entre dos dispositivos. */
+.pasos { margin: 0; padding-left: 20px; display: grid; gap: 7px; }
+.pasos li { font-size: var(--t-sm); color: var(--chalk-dim); }
+.pasos b { color: var(--chalk); }
+
 /* ── Armado del día: grupos musculares y ejercicios elegibles ───────────── */
 .filters--grupos { gap: 8px; }
 .chip--grupo { gap: 7px; font-weight: 600; }
